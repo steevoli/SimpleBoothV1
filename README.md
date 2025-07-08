@@ -33,6 +33,23 @@ Cette application transforme votre Raspberry Pi en un photobooth professionnel a
 - **Écran tactile** : Écran 7 pouces recommandé
 - **Imprimante thermique Serie** : Compatible avec le script `ScriptPythonPOS.py`
 
+### 🛒 Liens d'achat (Affiliation)
+
+Voici une liste de matériel compatible. Les liens sont affiliés et aident à soutenir le projet.
+
+- **Raspberry Pi & Accessoires :**
+  - [Raspberry Pi 5](https://amzlink.to/az0ncNNUsGjUH)
+  - [Alimentation Raspberry Pi 5](https://amzlink.to/az01ijEmlFqxT)
+- **Caméras :**
+  - [Pi Camera 3](https://amzlink.to/az0eEXwhnxNvO)
+  - [Pi Camera 2.1](https://amzlink.to/az0mgp7Sob1xh)
+- **Imprimantes Thermiques :**
+  - [Imprimante Thermique (Amazon)](https://amzlink.to/az0wTKS9Bfig2)
+  - [Imprimante Thermique (AliExpress)](https://s.click.aliexpress.com/e/_oFyCgCI)
+  - [Imprimante Thermique (France)](https://www.gotronic.fr/art-imprimante-thermique-ada597-21349.htm)
+- **Écran :**
+  - [Ecran Waveshare (Amazon)](https://amzlink.to/az03G4UMruNnc)
+
 ### Installation
 
 ### 🚀 Installation
