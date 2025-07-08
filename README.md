@@ -1,6 +1,6 @@
 # 📸 Photobooth Raspberry Pi
 
-> **Application Flask professionnelle pour photobooth tactile avec flux vidéo temps réel, capture instantanée, effets IA et intégration Telegram**
+> **Application Flask pour photobooth tactile avec flux vidéo temps réel, capture instantanée, effets IA et intégration Telegram**
 
 ![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)
 ![Flask](https://img.shields.io/badge/Flask-2.3.3-green.svg)
@@ -22,7 +22,6 @@ Cette application transforme votre Raspberry Pi en un photobooth professionnel a
 - **Bot Telegram** pour envoi automatique des photos sur un groupe/canal
 - **Impression thermique** avec texte personnalisable
 - **Interface d'administration** complète
-- **Design moderne** avec Bootstrap 5 et FontAwesome
 
 ## 🔧️ Matériel requis
 
@@ -32,26 +31,61 @@ Cette application transforme votre Raspberry Pi en un photobooth professionnel a
   - Raspberry Pi Camera (v1, v2, v3, HQ)
   - Caméra USB standard (webcam)
 - **Écran tactile** : Écran 7 pouces recommandé
-- **Imprimante thermique** : Compatible avec le script `ScriptPythonPOS.py`
+- **Imprimante thermique Serie** : Compatible avec le script `ScriptPythonPOS.py`
 
 ### Installation
 
-1. **Installer les dépendances Python :**
-```bash
-pip install -r requirements.txt
-```
+### 🚀 Installation
 
-2. **Vérifier que votre script d'impression est présent :**
-   - Le fichier `ScriptPythonPOS.py` doit être dans le même dossier
+L'installation peut se faire de deux manières : automatiquement via un script (recommandé sur Raspberry Pi) ou manuellement.
 
-3. **Sur Raspberry Pi, installer les dépendances système :**
-```bash
-sudo apt update
-# Pour Pi Camera
-sudo apt install libcamera-apps
-# Pour caméra USB
-sudo apt install python3-opencv
-```
+#### Méthode 1 : Installation automatique avec `setup.sh` (Recommandé)
+
+Un script `setup.sh` est fourni pour automatiser l'ensemble du processus sur un système basé sur Debian (comme Raspberry Pi OS).
+
+1.  **Rendre le script exécutable :**
+    ```bash
+    chmod +x setup.sh
+    ```
+
+2.  **Lancer le script d'installation :**
+    ```bash
+    ./setup.sh
+    ```
+    Ce script s'occupe de :
+    - Mettre à jour les paquets système.
+    - Installer les dépendances système (`libcamera-apps`, `python3-opencv`).
+    - Créer un environnement virtuel `venv`.
+    - Installer les dépendances Python de `requirements.txt` dans cet environnement.
+    - Creer un mode kiosk automatique au demarrage du systeme.
+
+#### Méthode 2 : Installation manuelle
+
+Suivez ces étapes pour une installation manuelle.
+
+1.  **Créer et activer un environnement virtuel :**
+    Il est fortement recommandé d'utiliser un environnement virtuel pour isoler les dépendances du projet.
+    ```bash
+    # Créer l'environnement
+    python3 -m venv venv
+
+    # Activer l'environnement
+    source venv/bin/activate
+    ```
+    > Pour quitter l'environnement virtuel, tapez simplement `deactivate`.
+
+2.  **Sur Raspberry Pi, installer les dépendances système :**
+    Si vous ne l'avez pas déjà fait, installez les paquets nécessaires pour les caméras.
+    ```bash
+    sudo apt update
+    sudo apt upgrade
+    sudo apt install libcamera-apps python3-opencv
+    ```
+
+3.  **Installer les dépendances Python :**
+    ```bash
+    pip install -r requirements.txt
+    ```
 
 ## Utilisation
 
@@ -91,22 +125,29 @@ L'application supporte deux types de caméras, configurables depuis la page d'ad
 > - Les permissions sont correctes (`sudo usermod -a -G video $USER`)
 > - La caméra est compatible avec OpenCV
 
-## Structure des fichiers
+## 📂 Structure des fichiers
+
+Le projet est organisé de manière modulaire pour une meilleure maintenance :
 
 ```
-App/
-├─ app.py                 # Application Flask principale
-├─ ScriptPythonPOS.py     # Script d'impression thermique (existant)
-├─ requirements.txt       # Dépendances Python
-├─ config.json           # Configuration (généré automatiquement)
-├─ photos/               # Photos originales
-├─ effet/                # Photos transformées par IA
-├─ templates/            # Templates HTML
-│   ├─ base.html
-│   ├─ index.html        # Page principale
-│   ├─ review.html       # Révision photo
-│   └─ admin.html        # Administration
-└─ README.md
+SimpleBooth/
+├── app.py                 # Application Flask principale (routes, logique)
+├── camera_utils.py        # Utilitaires pour la gestion des caméras (Pi Camera, USB)
+├── config_utils.py        # Utilitaires pour charger/sauvegarder la configuration
+├── telegram_utils.py      # Utilitaires pour l'envoi de messages via le bot Telegram
+├── ScriptPythonPOS.py     # Script autonome pour l'impression thermique
+├── setup.sh               # Script d'installation automatisée pour Raspberry Pi
+├── requirements.txt       # Dépendances Python
+├── static/                # Fichiers statiques
+│   └── camera-placeholder.svg
+├── templates/             # Templates HTML (Jinja2)
+│   ├── index.html         # Interface principale du photobooth
+│   ├── review.html        # Page de prévisualisation et d'action post-capture
+│   ├── admin.html         # Panneau d'administration
+│   └── base.html          # Template de base commun
+├── photos/                # Dossier pour les photos originales (créé au lancement)
+├── effet/                 # Dossier pour les photos avec effets (créé au lancement)
+└── config.json            # Fichier de configuration (créé au lancement)
 ```
 
 ## Configuration
@@ -135,15 +176,6 @@ La configuration est sauvegardée dans `config.json` :
 - `telegram_chat_id` : ID du chat/groupe/canal de destination
 - `telegram_send_type` : Type de photos à envoyer ('photos', 'effet' ou 'both')
 
-## Notes techniques
-
-- **Caméra** : Utilise `libcamera-still` pour la capture sur Raspberry Pi
-- **Impression** : Intègre votre script existant avec les paramètres configurés
-- **Interface** : Responsive et optimisée pour écran tactile
-- **Stockage** : Photos originales dans `photos/`, photos avec effet IA dans `effet/`
-- **IA** : Utilise l'API Runware v1.0.0 pour des transformations artistiques
-- **Diaporama** : Mode automatique après période d'inactivité, désactivable dans l'admin
-- **Telegram** : Bot asynchrone utilisant python-telegram-bot v20.7
 
 ## Configuration du bot Telegram
 
@@ -175,8 +207,7 @@ La configuration est sauvegardée dans `config.json` :
 ## Dépannage
 
 - **Caméra non détectée** : Vérifier que la caméra est activée dans `raspi-config`
-- **Erreur d'impression** : Vérifier la connexion de l'imprimante thermique
-- **Interface lente** : Réduire la résolution ou désactiver la haute densité
+- **Erreur d'impression** : Vérifier la connexion de l'imprimante thermique et TX/RX
 - **Effets IA ne fonctionnent pas** : Vérifier la validité de la clé API Runware
 - **"Chat not found" dans Telegram** : 
   - Vérifier que le bot est bien membre du groupe/canal
