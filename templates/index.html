@@ -4,6 +4,25 @@
 
 {% block content %}
 <div class="container-fluid p-3" style="height: 100vh; overflow: hidden; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background-color: #1a1a1a;">
+    <style>
+    /* Ajustements spécifiques pour les petits écrans 800x480 */
+    @media (max-width: 800px) and (max-height: 480px) {
+        #videoContainer {
+            height: calc(100vh - 1rem);
+            width: calc(100vw - 1rem);
+        }
+
+        #videoPreview {
+            max-width: calc(100vw - 1rem);
+            max-height: calc(100vh - 1rem);
+        }
+
+        #captureBtn {
+            font-size: 1.2rem;
+            padding: 8px 16px;
+        }
+    }
+    </style>
     <!-- Conteneur vidéo avec marges élégantes -->
     <div class="video-container position-relative d-flex align-items-center justify-content-center" id="videoContainer" style="height: calc(100vh - 2rem); width: calc(100vw - 2rem);">
         <img id="videoPreview" 
