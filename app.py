@@ -853,10 +853,48 @@ def generate_video_stream():
     try:
         stop_camera_process()
 
+        # Déterminer l'ordre de priorité des caméras.
+        preferred_order = []
         if camera_type == 'usb':
-            yield from stream_usb_camera()
+            preferred_order = ['usb']
         else:
-            yield from stream_picamera()
+            # Pour les configurations PiCamera, essayer d'abord libcamera puis la caméra USB en secours.
+            preferred_order = ['picamera', 'usb']
+
+        errors = []
+
+        # Si nous n'utilisons la caméra USB qu'en secours, vérifier qu'au moins une caméra est détectée
+        # afin d'éviter de tenter inutilement un démarrage quand aucun périphérique n'est présent.
+        if camera_type != 'usb' and 'usb' in preferred_order:
+            try:
+                available_usb = detect_cameras()
+            except Exception as detect_err:
+                logger.info(f"[CAMERA] Impossible de détecter les caméras USB: {detect_err}")
+                errors.append(f"usb: détection impossible ({detect_err})")
+                preferred_order = [mode for mode in preferred_order if mode != 'usb']
+            else:
+                if not available_usb:
+                    logger.info("[CAMERA] Aucune caméra USB détectée, désactivation du repli USB.")
+                    errors.append("usb: aucune caméra USB détectée")
+                    preferred_order = [mode for mode in preferred_order if mode != 'usb']
+
+        for camera_mode in preferred_order:
+            try:
+                if camera_mode == 'usb':
+                    yield from stream_usb_camera()
+                else:
+                    yield from stream_picamera()
+                return
+            except (FileNotFoundError, RuntimeError) as err:
+                # Pour libcamera, tenter la caméra USB en secours.
+                errors.append(f"{camera_mode}: {err}")
+                logger.info(f"[CAMERA] Échec du mode {camera_mode}: {err}")
+                stop_camera_process()
+                continue
+
+        # Si toutes les tentatives échouent, lever une erreur explicite.
+        joined_errors = " | ".join(errors) if errors else "Aucune caméra détectée"
+        raise RuntimeError(f"Impossible de démarrer la caméra. {joined_errors}")
 
     except Exception as e:
         logger.info(f"Erreur flux vidéo: {e}")
