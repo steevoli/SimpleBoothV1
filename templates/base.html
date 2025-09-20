@@ -73,6 +73,24 @@
             font-weight: bold;
             min-height: 60px;
         }
+
+        .btn-usb {
+            background: linear-gradient(45deg, #1e88e5, #1565c0);
+            border: none;
+            border-radius: 15px;
+            padding: 15px 30px;
+            font-size: 1.2em;
+            font-weight: bold;
+            color: #fff;
+            min-height: 60px;
+            transition: all 0.3s ease;
+        }
+
+        .btn-usb:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(30, 136, 229, 0.4);
+            color: #fff;
+        }
         
         .video-container {
             position: relative;
@@ -240,13 +258,47 @@
                 autohide: true,
                 delay: 5000
             });
-            
-            // Ajouter une animation de sortie
+
             toastElement.addEventListener('hide.bs.toast', function() {
                 toastElement.style.animation = 'slideOutDown 0.5s ease-in';
             });
         });
     });
+
+    function showToast(message, type = 'success') {
+        const container = document.querySelector('.toast-container');
+        if (!container) {
+            alert(message);
+            return;
+        }
+
+        const toastElement = document.createElement('div');
+        toastElement.className = 'toast show custom-toast';
+        toastElement.setAttribute('role', 'alert');
+        toastElement.dataset.bsAutohide = 'true';
+        toastElement.dataset.bsDelay = '5000';
+
+        const iconClass = type === 'error' ? 'exclamation-triangle text-danger' : 'check-circle text-success';
+        const title = type === 'error' ? 'Erreur' : 'Succès';
+        const safeMessage = document.createElement('div');
+        safeMessage.textContent = message;
+
+        toastElement.innerHTML = `
+            <div class="toast-body text-center p-4">
+                <div class="mb-2">
+                    <i class="fas fa-${iconClass}" style="font-size: 2rem;"></i>
+                </div>
+                <div class="fw-bold mb-2" style="font-size: 1.1rem;">${title}</div>
+                <div>${safeMessage.innerHTML}</div>
+                <button type="button" class="btn-close position-absolute top-0 end-0 m-2" data-bs-dismiss="toast" style="font-size: 0.8rem;"></button>
+            </div>
+        `;
+
+        container.appendChild(toastElement);
+        const toast = new bootstrap.Toast(toastElement);
+        toast.show();
+        toastElement.addEventListener('hidden.bs.toast', () => toastElement.remove());
+    }
     </script>
     
     <style>

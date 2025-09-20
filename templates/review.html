@@ -63,78 +63,42 @@
     <div class="action-buttons">
         <div class="row g-2 g-md-3 justify-content-center">
             {% if config.effect_enabled %}
-            <div class="col">
+            <div class="col-6 col-md-3">
                 <button class="btn btn-warning w-100 btn-review" onclick="applyEffect()">
                     <i class="fas fa-magic"></i>
                     <span>Effet</span>
                 </button>
             </div>
-            {% if config.printer_enabled %}
-            <div class="col">
-                <button class="btn btn-success w-100 btn-review" onclick="printPhoto()">
-                    <i class="fas fa-print"></i>
-                    <span>Imprimer</span>
+            {% endif %}
+            <div class="col-6 col-md-3">
+                <button class="btn btn-usb w-100 btn-review" onclick="savePhotoToUsb(this)">
+                    <i class="fas fa-save"></i>
+                    <span>Sauvegarder</span>
                 </button>
             </div>
-            {% endif %}
-            <div class="col">
+            <div class="col-6 col-md-3">
                 <a href="{{ url_for('index') }}" class="btn btn-primary w-100 btn-review">
                     <i class="fas fa-redo"></i>
                     <span>Reprendre</span>
                 </a>
             </div>
-            <div class="col">
+            <div class="col-6 col-md-3">
                 <button class="btn btn-danger w-100 btn-review" onclick="deletePhoto()">
                     <i class="fas fa-trash"></i>
                     <span>Supprimer</span>
                 </button>
             </div>
-            {% else %}
-            {% if config.printer_enabled %}
-                <div class="col-4">
-                    <button class="btn btn-success w-100 btn-review" onclick="printPhoto()">
-                        <i class="fas fa-print"></i>
-                        <span>Imprimer</span>
-                    </button>
-                </div>
-                <div class="col-4">
-                    <a href="{{ url_for('index') }}" class="btn btn-primary w-100 btn-review">
-                        <i class="fas fa-redo"></i>
-                        <span>Reprendre</span>
-                    </a>
-                </div>
-                <div class="col-4">
-                    <button class="btn btn-danger w-100 btn-review" onclick="deletePhoto()">
-                        <i class="fas fa-trash"></i>
-                        <span>Supprimer</span>
-                    </button>
-                </div>
-            {% else %}
-                <div class="col-6">
-                    <a href="{{ url_for('index') }}" class="btn btn-primary w-100 btn-review">
-                        <i class="fas fa-redo"></i>
-                        <span>Reprendre</span>
-                    </a>
-                </div>
-                <div class="col-6">
-                    <button class="btn btn-danger w-100 btn-review" onclick="deletePhoto()">
-                        <i class="fas fa-trash"></i>
-                        <span>Supprimer</span>
-                    </button>
-                </div>
-            {% endif %}
-            {% endif %}
         </div>
     </div>
 </div>
 
-<!-- Overlay d'impression en plein écran -->
-<div id="printOverlay" class="d-none" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.8); z-index: 9999; display: flex; align-items: center; justify-content: center;">
-    <div class="text-center text-white">
+<!-- Overlay de sauvegarde en plein écran -->
+<div id="saveOverlay" class="d-none" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.8); z-index: 9999; display: flex; align-items: center; justify-content: center;">
+    <div class="text-center text-white" id="saveOverlayContent">
         <div class="mb-4">
             <i class="fas fa-spinner fa-spin" style="font-size: 4rem;"></i>
         </div>
-        <h2 class="mb-3">Impression en cours...</h2>
+        <h2 class="mb-3">Sauvegarde en cours...</h2>
         <p class="mb-0">Veuillez patienter</p>
     </div>
 </div>
@@ -191,85 +155,72 @@
 
 {% block scripts %}
 <script>
-async function printPhoto() {
-    const printBtn = event.target;
-    const originalContent = printBtn.innerHTML;
-    const overlay = document.getElementById('printOverlay');
-    
-    // Désactiver le bouton et afficher l'overlay
-    printBtn.disabled = true;
-    printBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Impression...';
+async function savePhotoToUsb(button) {
+    const overlay = document.getElementById('saveOverlay');
+    const overlayContent = document.getElementById('saveOverlayContent');
+    const originalContent = button.innerHTML;
+
+    button.disabled = true;
+    button.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Sauvegarde...';
+
+    overlayContent.innerHTML = `
+        <div class="mb-4">
+            <i class="fas fa-spinner fa-spin" style="font-size: 4rem;"></i>
+        </div>
+        <h2 class="mb-3">Sauvegarde en cours...</h2>
+        <p class="mb-0">Veuillez patienter</p>
+    `;
     overlay.classList.remove('d-none');
     overlay.style.display = 'flex';
-    
+
     try {
-        const response = await fetch('/print_photo', {
+        const response = await fetch('/save_photo_usb', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
             }
         });
-        
+
         const result = await response.json();
-        
+
         if (result.success) {
-            // Succès de l'impression - modifier le contenu de l'overlay
-            overlay.innerHTML = 
-                '<div class="text-center text-white">' +
-                '<div class="mb-4">' +
-                '<i class="fas fa-check-circle" style="font-size: 4rem; color: #28a745;"></i>' +
-                '</div>' +
-                '<h2 class="mb-3">Impression terminée !</h2>' +
-                '<p class="mb-0">Redirection en cours...</p>' +
-                '</div>';
-            
-            // Rediriger vers l'accueil après 3 secondes
+            overlayContent.innerHTML = `
+                <div class="mb-4">
+                    <i class="fas fa-check-circle" style="font-size: 4rem; color: #4caf50;"></i>
+                </div>
+                <h2 class="mb-3">Sauvegarde terminée !</h2>
+                <p class="mb-0">Fichier copié sur la clé USB.</p>
+            `;
+            if (result.path) {
+                showToast(`Photo sauvegardée sur la clé USB : ${result.path}`, 'success');
+            }
+
             setTimeout(() => {
-                window.location.href = '/';
-            }, 3000);
-            
-        } else if (result.error_type === 'no_paper') {
-            // Cas spécifique du manque de papier - rediriger immédiatement vers l'index
-            overlay.innerHTML = 
-                '<div class="text-center text-white">' +
-                '<div class="mb-4">' +
-                '<i class="fas fa-exclamation-triangle" style="font-size: 4rem; color: #ffc107;"></i>' +
-                '</div>' +
-                '<h2 class="mb-3">Plus de papier !</h2>' +
-                '<p class="mb-0">Redirection en cours...</p>' +
-                '</div>';
-            
-            // Rediriger vers l'accueil avec paramètre pour afficher l'alerte
-            setTimeout(() => {
-                window.location.href = '/?show_paper_alert=1';
+                overlay.classList.add('d-none');
+                overlay.style.display = 'none';
             }, 2000);
-            
         } else {
-            throw new Error(result.error || 'Erreur d\'impression');
+            throw new Error(result.error || 'Erreur de sauvegarde');
         }
-        
     } catch (error) {
-        console.error('Erreur lors de l\'impression:', error);
-        
-        // Afficher l'erreur dans l'overlay
-        overlay.innerHTML = 
-            '<div class="text-center text-white">' +
-            '<div class="mb-4">' +
-            '<i class="fas fa-exclamation-triangle" style="font-size: 4rem; color: #dc3545;"></i>' +
-            '</div>' +
-            '<h2 class="mb-3">Erreur d\'impression</h2>' +
-            '<p class="mb-3">' + error.message + '</p>' +
-            '<button class="btn btn-light" onclick="closeOverlay()">Fermer</button>' +
-            '</div>';
-        
-        // Réactiver le bouton
-        printBtn.disabled = false;
-        printBtn.innerHTML = originalContent;
+        console.error('Erreur lors de la sauvegarde USB:', error);
+        overlayContent.innerHTML = `
+            <div class="mb-4">
+                <i class="fas fa-exclamation-triangle" style="font-size: 4rem; color: #dc3545;"></i>
+            </div>
+            <h2 class="mb-3">Erreur de sauvegarde</h2>
+            <p class="mb-3">${error.message}</p>
+            <button class="btn btn-light" onclick="closeSaveOverlay()">Fermer</button>
+        `;
+        showToast(error.message || 'Erreur de sauvegarde', 'error');
+    } finally {
+        button.disabled = false;
+        button.innerHTML = originalContent;
     }
 }
 
-function closeOverlay() {
-    const overlay = document.getElementById('printOverlay');
+function closeSaveOverlay() {
+    const overlay = document.getElementById('saveOverlay');
     overlay.classList.add('d-none');
     overlay.style.display = 'none';
 }
