@@ -749,14 +749,11 @@ def generate_video_stream():
 
     camera_type = config.get('camera_type', 'picamera')
 
-    def stream_usb_camera(reason: Optional[str] = None):
+    def stream_usb_camera():
         """Démarrer et diffuser un flux depuis une caméra USB."""
         global usb_camera, last_frame
 
-        if reason:
-            logger.warning(f"[CAMERA] Bascule vers la caméra USB : {reason}")
-        else:
-            logger.info("[CAMERA] Démarrage de la caméra USB...")
+        logger.info("[CAMERA] Démarrage de la caméra USB...")
 
         camera_id = config.get('usb_camera_id', 0)
         usb_camera = UsbCamera(camera_id=camera_id)
@@ -859,15 +856,7 @@ def generate_video_stream():
         if camera_type == 'usb':
             yield from stream_usb_camera()
         else:
-            try:
-                yield from stream_picamera()
-            except FileNotFoundError as err:
-                stop_camera_process()
-                yield from stream_usb_camera(str(err))
-            except RuntimeError as err:
-                logger.warning(f"[CAMERA] Pi Camera indisponible: {err}")
-                stop_camera_process()
-                yield from stream_usb_camera(str(err))
+            yield from stream_picamera()
 
     except Exception as e:
         logger.info(f"Erreur flux vidéo: {e}")
