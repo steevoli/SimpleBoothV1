@@ -221,10 +221,10 @@ function initCamera() {
 }
 
 function showCameraError() {
-    document.getElementById('videoContainer').innerHTML = 
+    document.getElementById('videoContainer').innerHTML =
         '<div class="alert alert-warning m-3">' +
         '<i class="fas fa-exclamation-triangle me-2"></i>' +
-        'Impossible d\'accéder à la caméra. Vérifiez que libcamera est installé et que la caméra est connectée.' +
+        'Impossible d\'accéder à la caméra. Vérifiez la configuration (USB ou libcamera) et la connexion de la caméra.' +
         '</div>';
 }
 
