@@ -746,107 +746,131 @@ def video_stream():
 def generate_video_stream():
     """Générer le flux vidéo MJPEG selon le type de caméra configuré"""
     global camera_process, usb_camera, last_frame
-    
-    # Déterminer le type de caméra à utiliser
+
     camera_type = config.get('camera_type', 'picamera')
-    
-    try:
-        # Arrêter tout processus caméra existant
-        stop_camera_process()
-        
-        # Utiliser la caméra USB si configurée
-        if camera_type == 'usb':
-            logger.info("[CAMERA] Démarrage de la caméra USB...")
-            camera_id = config.get('usb_camera_id', 0)
-            usb_camera = UsbCamera(camera_id=camera_id)
-            if not usb_camera.start():
-                raise Exception(f"Impossible de démarrer la caméra USB avec ID {camera_id}")
-            
-            # Générateur de frames pour la caméra USB
-            while True:
-                frame = usb_camera.get_frame()
-                if frame:
-                    # Stocker la frame pour capture instantanée
-                    with frame_lock:
-                        last_frame = frame
-                    
-                    # Envoyer la frame au navigateur
-                    yield (b'--frame\r\n'
-                           b'Content-Type: image/jpeg\r\n'
-                           b'Content-Length: ' + str(len(frame)).encode() + b'\r\n\r\n' +
-                           frame + b'\r\n')
-                else:
-                    time.sleep(0.03)  # Attendre si pas de frame disponible
-        
-        # Utiliser la Pi Camera par défaut
+
+    def stream_usb_camera(reason: Optional[str] = None):
+        """Démarrer et diffuser un flux depuis une caméra USB."""
+        global usb_camera, last_frame
+
+        if reason:
+            logger.warning(f"[CAMERA] Bascule vers la caméra USB : {reason}")
         else:
-            logger.info("[CAMERA] Démarrage de la Pi Camera...")
-            # Commande libcamera-vid pour flux MJPEG - résolution 16/9
-            cmd = [
-                'libcamera-vid',
-                '--codec', 'mjpeg',
-                '--width', '1280',   # Résolution native plus compatible
-                '--height', '720',   # Vrai 16/9 sans bandes noires
-                '--framerate', '15', # Framerate plus élevé pour cette résolution
-                '--timeout', '0',    # Durée infinie
-                '--output', '-',     # Sortie vers stdout
-                '--inline',          # Headers inline
-                '--flush',           # Flush immédiat
-                '--nopreview'        # Pas d'aperçu local
-            ]
-            
+            logger.info("[CAMERA] Démarrage de la caméra USB...")
+
+        camera_id = config.get('usb_camera_id', 0)
+        usb_camera = UsbCamera(camera_id=camera_id)
+        if not usb_camera.start():
+            error_msg = usb_camera.error or f"Impossible de démarrer la caméra USB avec ID {camera_id}"
+            raise RuntimeError(error_msg)
+
+        while True:
+            frame = usb_camera.get_frame()
+            if frame:
+                with frame_lock:
+                    last_frame = frame
+
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n'
+                       b'Content-Length: ' + str(len(frame)).encode() + b'\r\n\r\n' +
+                       frame + b'\r\n')
+            else:
+                time.sleep(0.03)
+
+    def stream_picamera():
+        """Démarrer et diffuser un flux via libcamera-vid."""
+        global camera_process, last_frame
+
+        logger.info("[CAMERA] Démarrage de la Pi Camera...")
+        cmd = [
+            'libcamera-vid',
+            '--codec', 'mjpeg',
+            '--width', '1280',
+            '--height', '720',
+            '--framerate', '15',
+            '--timeout', '0',
+            '--output', '-',
+            '--inline',
+            '--flush',
+            '--nopreview'
+        ]
+
+        try:
             camera_process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 bufsize=0
             )
-            
-            # Buffer pour assembler les frames JPEG
-            buffer = b''
-            
-            while camera_process and camera_process.poll() is None:
-                try:
-                    # Lire les données par petits blocs
-                    chunk = camera_process.stdout.read(1024)
-                    if not chunk:
-                        break
-                        
-                    buffer += chunk
-                    
-                    # Chercher les marqueurs JPEG
-                    while True:
-                        # Chercher le début d'une frame JPEG (0xFFD8)
-                        start = buffer.find(b'\xff\xd8')
-                        if start == -1:
-                            break
-                            
-                        # Chercher la fin de la frame JPEG (0xFFD9)
-                        end = buffer.find(b'\xff\xd9', start + 2)
-                        if end == -1:
-                            break
-                            
-                        # Extraire la frame complète
-                        jpeg_frame = buffer[start:end + 2]
-                        buffer = buffer[end + 2:]
-                        
-                        # Stocker la frame pour capture instantanée
-                        with frame_lock:
-                            last_frame = jpeg_frame
-                        
-                        # Envoyer la frame au navigateur
-                        yield (b'--frame\r\n'
-                               b'Content-Type: image/jpeg\r\n'
-                               b'Content-Length: ' + str(len(jpeg_frame)).encode() + b'\r\n\r\n' +
-                               jpeg_frame + b'\r\n')
-                               
-                except Exception as e:
-                    logger.info(f"[CAMERA] Erreur lecture flux: {e}")
+        except FileNotFoundError as err:
+            raise FileNotFoundError("libcamera-vid introuvable") from err
+
+        buffer = b''
+
+        while camera_process and camera_process.poll() is None:
+            try:
+                chunk = camera_process.stdout.read(1024)
+                if not chunk:
                     break
-                
+
+                buffer += chunk
+
+                while True:
+                    start = buffer.find(b'\xff\xd8')
+                    if start == -1:
+                        break
+
+                    end = buffer.find(b'\xff\xd9', start + 2)
+                    if end == -1:
+                        break
+
+                    jpeg_frame = buffer[start:end + 2]
+                    buffer = buffer[end + 2:]
+
+                    with frame_lock:
+                        last_frame = jpeg_frame
+
+                    yield (b'--frame\r\n'
+                           b'Content-Type: image/jpeg\r\n'
+                           b'Content-Length: ' + str(len(jpeg_frame)).encode() + b'\r\n\r\n' +
+                           jpeg_frame + b'\r\n')
+
+            except Exception as e:
+                logger.info(f"[CAMERA] Erreur lecture flux: {e}")
+                break
+
+        if camera_process:
+            return_code = camera_process.poll()
+            if return_code not in (None, 0):
+                stderr_output = b''
+                if camera_process.stderr:
+                    try:
+                        stderr_output = camera_process.stderr.read()
+                    except Exception:
+                        stderr_output = b''
+                stderr_text = stderr_output.decode(errors='ignore').strip()
+                raise RuntimeError(
+                    f"libcamera-vid a échoué (code {return_code}). {stderr_text}"
+                )
+
+    try:
+        stop_camera_process()
+
+        if camera_type == 'usb':
+            yield from stream_usb_camera()
+        else:
+            try:
+                yield from stream_picamera()
+            except FileNotFoundError as err:
+                stop_camera_process()
+                yield from stream_usb_camera(str(err))
+            except RuntimeError as err:
+                logger.warning(f"[CAMERA] Pi Camera indisponible: {err}")
+                stop_camera_process()
+                yield from stream_usb_camera(str(err))
+
     except Exception as e:
         logger.info(f"Erreur flux vidéo: {e}")
-        # Envoyer une frame d'erreur
         error_msg = f"Erreur caméra: {str(e)}"
         yield (b'--frame\r\n'
                b'Content-Type: text/plain\r\n\r\n' +
