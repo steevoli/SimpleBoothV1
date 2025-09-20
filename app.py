@@ -14,6 +14,8 @@ import atexit
 import base64
 import sys
 from datetime import datetime
+from pathlib import Path
+from typing import Optional
 from runware import Runware, IImageInference
 from config_utils import (
     PHOTOS_FOLDER,
@@ -24,6 +26,13 @@ from config_utils import (
 )
 from camera_utils import UsbCamera, detect_cameras
 from telegram_utils import send_to_telegram
+from storage_usb import (
+    ensure_usb_folder_exists,
+    get_usb_mount_point,
+    list_usb_photos,
+    save_photo_to_usb,
+    delete_usb_photo,
+)
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'photobooth_secret_key_2024')
@@ -153,6 +162,19 @@ def index():
 last_frame = None
 frame_lock = threading.Lock()
 
+
+def _resolve_current_photo_path() -> Optional[Path]:
+    """Retourne le chemin absolu de la photo en cours."""
+
+    if not current_photo:
+        return None
+
+    for folder in (PHOTOS_FOLDER, EFFECT_FOLDER):
+        photo_path = Path(folder) / current_photo
+        if photo_path.exists():
+            return photo_path
+    return None
+
 @app.route('/capture', methods=['POST'])
 def capture_photo():
     """Capturer la frame MJPEG actuelle directement depuis le flux vidéo"""
@@ -195,68 +217,100 @@ def review_photo():
         return redirect(url_for('index'))
     return render_template('review.html', photo=current_photo, config=config)
 
+@app.route('/save_photo_usb', methods=['POST'])
 @app.route('/print_photo', methods=['POST'])
-def print_photo():
-    """Imprimer la photo actuelle"""
-    global current_photo
-    
-    if not current_photo:
-        return jsonify({'success': False, 'error': 'Aucune photo à imprimer'})
-    
+def save_photo_usb_route():
+    """Sauvegarde la photo courante sur la clé USB."""
+
+    photo_path = _resolve_current_photo_path()
+    if not photo_path:
+        return jsonify({'success': False, 'error': 'Aucune photo à sauvegarder'})
+
     try:
-        # Vérifier si l'imprimante est activée
-        if not config.get('printer_enabled', True):
-            return jsonify({'success': False, 'error': 'Imprimante désactivée dans la configuration'})
-        
-        # Chercher la photo dans le bon dossier
-        photo_path = None
-        if os.path.exists(os.path.join(PHOTOS_FOLDER, current_photo)):
-            photo_path = os.path.join(PHOTOS_FOLDER, current_photo)
-        elif os.path.exists(os.path.join(EFFECT_FOLDER, current_photo)):
-            photo_path = os.path.join(EFFECT_FOLDER, current_photo)
-        else:
-            return jsonify({'success': False, 'error': 'Photo introuvable'})
-        
-        # Vérifier l'existence du script d'impression
-        script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ScriptPythonPOS.py')
-        if not os.path.exists(script_path):
-            return jsonify({'success': False, 'error': 'Script d\'impression introuvable (ScriptPythonPOS.py)'})
-        
-        # Construire la commande d'impression avec les nouveaux paramètres
-        cmd = ['python3', 'ScriptPythonPOS.py', '--image', photo_path]
-        
-        # Ajouter les paramètres de port et baudrate
-        printer_port = config.get('printer_port', '/dev/ttyAMA0')
-        printer_baudrate = config.get('printer_baudrate', 9600)
-        cmd.extend(['--port', printer_port, '--baudrate', str(printer_baudrate)])
-        
-        # Ajouter le texte de pied de page si configuré
-        footer_text = config.get('footer_text', '')
-        if footer_text:
-            cmd.extend(['--text', footer_text])
-        
-        # Ajouter l'option haute résolution selon la configuration
-        print_resolution = config.get('print_resolution', 384)
-        if print_resolution > 384:
-            cmd.append('--hd')
-        
-        # Exécuter l'impression
-        result = subprocess.run(cmd, capture_output=True, text=True, cwd=os.path.dirname(os.path.abspath(__file__)))
-        
-        if result.returncode == 0:
-            return jsonify({'success': True, 'message': 'Photo imprimée avec succès!'})
-        elif result.returncode == 2:
-            # Code d'erreur spécifique pour manque de papier
-            return jsonify({'success': False, 'error': 'Plus de papier dans l\'imprimante', 'error_type': 'no_paper'})
-        else:
-            error_msg = result.stderr.strip() if result.stderr else 'Erreur inconnue'
-            if 'ModuleNotFoundError' in error_msg and 'escpos' in error_msg:
-                return jsonify({'success': False, 'error': 'Module escpos manquant. Installez-le avec: pip install python-escpos'})
-            else:
-                return jsonify({'success': False, 'error': f'Erreur d\'impression: {error_msg}'})
-            
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)})
+        saved_path = save_photo_to_usb(photo_path)
+        logger.info("Photo sauvegardée sur USB: %s", saved_path)
+        return jsonify({
+            'success': True,
+            'message': 'Photo sauvegardée avec succès',
+            'path': str(saved_path),
+        })
+    except FileNotFoundError as exc:
+        error_message = 'Aucune clé USB détectée'
+        if str(exc) and str(exc) != 'Aucune clé USB détectée':
+            error_message = str(exc)
+        logger.error("[USB] %s", error_message)
+        return jsonify({'success': False, 'error': error_message}), 404
+    except PermissionError as exc:
+        logger.error("[USB] Permission refusée pour la sauvegarde: %s", exc)
+        return jsonify({'success': False, 'error': "Permission refusée sur la clé USB"}), 403
+    except OSError as exc:
+        logger.error("[USB] Erreur système lors de la sauvegarde: %s", exc)
+        return jsonify({'success': False, 'error': str(exc)}), 500
+    except Exception as exc:  # pragma: no cover - erreur imprévue
+        logger.exception("[USB] Erreur inattendue lors de la sauvegarde")
+        return jsonify({'success': False, 'error': str(exc)}), 500
+
+
+@app.route('/usb/photos', methods=['GET'])
+def usb_photos():
+    """Retourne la liste des photos stockées sur la clé USB."""
+
+    try:
+        photos = list_usb_photos()
+        for photo in photos:
+            photo['url'] = url_for('serve_usb_photo', filename=photo['name'])
+        mount_point = get_usb_mount_point()
+        return jsonify({
+            'success': True,
+            'photos': photos,
+            'mount_point': str(mount_point) if mount_point else None,
+        })
+    except FileNotFoundError:
+        logger.warning("[USB] Liste impossible: aucune clé détectée")
+        return jsonify({'success': False, 'error': 'Aucune clé USB détectée.'}), 404
+    except PermissionError:
+        logger.error("[USB] Accès refusé lors de la liste USB")
+        return jsonify({'success': False, 'error': 'Permission refusée sur la clé USB.'}), 403
+    except OSError as exc:
+        logger.error("[USB] Erreur système lors de la liste USB: %s", exc)
+        return jsonify({'success': False, 'error': str(exc)}), 500
+
+
+@app.route('/usb/photo/<path:filename>', methods=['GET'])
+def serve_usb_photo(filename):
+    """Servez une photo stockée sur la clé USB."""
+
+    try:
+        folder = ensure_usb_folder_exists()
+    except FileNotFoundError:
+        abort(404)
+
+    safe_folder = folder.resolve()
+    target = (folder / filename).resolve()
+    if not str(target).startswith(str(safe_folder)):
+        abort(404)
+    if not target.exists() or target.is_dir():
+        abort(404)
+    return send_from_directory(folder, target.name)
+
+
+@app.route('/usb/photo/<path:filename>', methods=['DELETE'])
+def delete_usb_photo_route(filename):
+    """Supprime une photo de la clé USB."""
+
+    try:
+        removed = delete_usb_photo(filename)
+        if not removed:
+            return jsonify({'success': False, 'error': 'Photo introuvable sur la clé USB.'}), 404
+        return jsonify({'success': True})
+    except FileNotFoundError:
+        return jsonify({'success': False, 'error': 'Aucune clé USB détectée.'}), 404
+    except PermissionError:
+        return jsonify({'success': False, 'error': 'Permission refusée sur la clé USB.'}), 403
+    except OSError as exc:
+        logger.error("[USB] Erreur lors de la suppression USB: %s", exc)
+        return jsonify({'success': False, 'error': str(exc)}), 500
+
 
 @app.route('/delete_current', methods=['POST'])
 def delete_current_photo():
