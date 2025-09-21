@@ -1,7 +1,16 @@
-import cv2
+import logging
 import threading
 import time
-import logging
+
+import cv2
+
+try:
+    from picamera2 import Picamera2
+
+    PICAMERA2_AVAILABLE = True
+except ImportError:  # pragma: no cover - dépend d'un environnement Raspberry Pi
+    Picamera2 = None  # type: ignore
+    PICAMERA2_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -137,8 +146,7 @@ class UsbCamera:
                     self.camera.release()
                     continue
                 self.is_running = True
-                self.thread = threading.Thread(target=self._capture_loop)
-                self.thread.daemon = True
+                self.thread = threading.Thread(target=self._capture_loop, daemon=True)
                 self.thread.start()
                 logger.info(f"[USB CAMERA] Caméra {self.camera_id} démarrée avec succès via backend {backend_name}")
                 return True
@@ -198,9 +206,97 @@ class UsbCamera:
 
     def stop(self):
         self.is_running = False
-        if self.thread:
-            self.thread.join(timeout=1.0)
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout=2)
+        self.thread = None
         if self.camera:
-            self.camera.release()
-        logger.info(f"[USB CAMERA] Caméra {self.camera_id} arrêtée")
+            try:
+                self.camera.release()
+            except Exception as err:
+                logger.info(f"[USB CAMERA] Erreur lors de la libération de la caméra: {err}")
+        self.camera = None
+
+
+class PiCameraStream:
+    """Gestion d'un flux Picamera2 sous forme de MJPEG."""
+
+    def __init__(self, resolution=(1280, 720), framerate=15):
+        if not PICAMERA2_AVAILABLE:
+            raise RuntimeError("Picamera2 non disponible sur ce système")
+
+        self.resolution = resolution
+        self.framerate = framerate
+        self.picam = None
+        self.thread = None
+        self.frame = None
+        self.lock = threading.Lock()
+        self.is_running = False
+        self.error = None
+
+    def start(self):
+        if self.is_running:
+            return True
+
+        try:
+            self.picam = Picamera2()
+            video_config = self.picam.create_video_configuration(
+                main={"size": self.resolution, "format": "RGB888"},
+                controls={"FrameRate": float(self.framerate)},
+            )
+            self.picam.configure(video_config)
+            self.picam.start()
+        except Exception as err:
+            self.error = f"Impossible d'initialiser Picamera2: {err}"
+            logger.info(f"[PICAMERA2] {self.error}")
+            self.stop()
+            return False
+
+        self.is_running = True
+        self.thread = threading.Thread(target=self._capture_loop, daemon=True)
+        self.thread.start()
+        logger.info("[PICAMERA2] Flux Picamera2 démarré")
+        return True
+
+    def _capture_loop(self):
+        while self.is_running and self.picam:
+            try:
+                frame = self.picam.capture_array("main")
+                if frame is None:
+                    time.sleep(0.01)
+                    continue
+                ret, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                if not ret:
+                    logger.info("[PICAMERA2] Impossible d'encoder la frame en JPEG")
+                    time.sleep(0.01)
+                    continue
+                with self.lock:
+                    self.frame = jpeg.tobytes()
+            except Exception as err:
+                logger.info(f"[PICAMERA2] Erreur de capture: {err}")
+                self.error = str(err)
+                time.sleep(0.05)
+
+    def get_frame(self):
+        with self.lock:
+            return self.frame
+
+    def stop(self):
+        self.is_running = False
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout=2)
+        self.thread = None
+
+        if self.picam:
+            try:
+                self.picam.stop()
+            except Exception as err:
+                logger.info(f"[PICAMERA2] Erreur lors de l'arrêt de la caméra: {err}")
+            try:
+                self.picam.close()
+            except Exception:
+                pass
+
+        self.picam = None
+        self.frame = None
+        logger.info("[PICAMERA2] Flux Picamera2 arrêté")
 
