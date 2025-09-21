@@ -24,7 +24,7 @@ from config_utils import (
     save_config,
     ensure_directories,
 )
-from camera_utils import UsbCamera, detect_cameras
+from camera_utils import PICAMERA2_AVAILABLE, PiCameraStream, UsbCamera, detect_cameras
 from telegram_utils import send_to_telegram
 from storage_usb import (
     ensure_usb_folder_exists,
@@ -152,6 +152,7 @@ current_photo = None
 camera_active = False
 camera_process = None
 usb_camera = None
+picamera_stream = None
 
 @app.route('/')
 def index():
@@ -775,10 +776,45 @@ def generate_video_stream():
                 time.sleep(0.03)
 
     def stream_picamera():
-        """Démarrer et diffuser un flux via libcamera-vid."""
-        global camera_process, last_frame
+        """Démarrer et diffuser un flux via Picamera2 ou libcamera-vid."""
+        global camera_process, last_frame, picamera_stream
 
         logger.info("[CAMERA] Démarrage de la Pi Camera...")
+
+        picamera_errors = []
+
+        # Première tentative : Picamera2 si disponible
+        if PICAMERA2_AVAILABLE:
+            try:
+                logger.info("[CAMERA] Utilisation de Picamera2 pour le flux vidéo")
+                picamera_stream = PiCameraStream(resolution=(1280, 720), framerate=15)
+                if not picamera_stream.start():
+                    error_reason = picamera_stream.error or "Initialisation Picamera2 inconnue"
+                    raise RuntimeError(error_reason)
+
+                while True:
+                    frame = picamera_stream.get_frame()
+                    if not frame:
+                        time.sleep(0.02)
+                        continue
+
+                    with frame_lock:
+                        last_frame = frame
+
+                    yield (b'--frame\r\n'
+                           b'Content-Type: image/jpeg\r\n'
+                           b'Content-Length: ' + str(len(frame)).encode() + b'\r\n\r\n' +
+                           frame + b'\r\n')
+            except Exception as err:
+                picamera_errors.append(str(err))
+                logger.info(f"[CAMERA] Picamera2 indisponible: {err}")
+                if picamera_stream:
+                    picamera_stream.stop()
+                    picamera_stream = None
+            else:
+                return
+
+        # Fallback : libcamera-vid via sous-processus
         cmd = [
             'libcamera-vid',
             '--codec', 'mjpeg',
@@ -800,7 +836,10 @@ def generate_video_stream():
                 bufsize=0
             )
         except FileNotFoundError as err:
-            raise FileNotFoundError("libcamera-vid introuvable") from err
+            missing = "libcamera-vid introuvable"
+            if picamera_errors:
+                missing += f" | Picamera2: {'; '.join(picamera_errors)}"
+            raise FileNotFoundError(missing) from err
 
         buffer = b''
 
@@ -846,9 +885,10 @@ def generate_video_stream():
                     except Exception:
                         stderr_output = b''
                 stderr_text = stderr_output.decode(errors='ignore').strip()
-                raise RuntimeError(
-                    f"libcamera-vid a échoué (code {return_code}). {stderr_text}"
-                )
+                error_parts = [f"libcamera-vid a échoué (code {return_code}). {stderr_text}".strip()]
+                if picamera_errors:
+                    error_parts.append(f"Picamera2: {'; '.join(picamera_errors)}")
+                raise RuntimeError(" | ".join(error_parts))
 
     try:
         stop_camera_process()
@@ -907,7 +947,7 @@ def generate_video_stream():
 
 def stop_camera_process():
     """Arrêter proprement le processus caméra (Pi Camera ou USB)"""
-    global camera_process, usb_camera
+    global camera_process, usb_camera, picamera_stream
     
     # Arrêter la caméra USB si active
     if usb_camera:
@@ -916,6 +956,13 @@ def stop_camera_process():
         except Exception as e:
             logger.info(f"[CAMERA] Erreur lors de l'arrêt de la caméra USB: {e}")
         usb_camera = None
+
+    if picamera_stream:
+        try:
+            picamera_stream.stop()
+        except Exception as e:
+            logger.info(f"[CAMERA] Erreur lors de l'arrêt de Picamera2: {e}")
+        picamera_stream = None
     
     # Arrêter le processus libcamera-vid si actif
     if camera_process:
