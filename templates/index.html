@@ -12,7 +12,8 @@
             width: calc(100vw - 1rem);
         }
 
-        #videoPreview {
+        #cameraVideo,
+        #cameraFallbackImage {
             max-width: calc(100vw - 1rem);
             max-height: calc(100vh - 1rem);
         }
@@ -48,15 +49,56 @@
     </style>
     <!-- Conteneur vidéo avec marges élégantes -->
     <div class="video-container position-relative d-flex align-items-center justify-content-center" id="videoContainer" style="height: calc(100vh - 2rem); width: calc(100vw - 2rem);">
-        <img id="videoPreview" 
-             src="{{ url_for('video_stream') }}" 
-             style="max-width: calc(100vw - 2rem); max-height: calc(100vh - 2rem); width: auto; height: auto; object-fit: contain; background-color: #000; border-radius: 15px; box-shadow: 0 8px 32px rgba(0,0,0,0.5);"
-             alt="Flux vidéo caméra">
-        
-        <!-- Countdown overlay -->
-        <div class="countdown d-none position-absolute top-50 start-50 translate-middle" id="countdown"></div>
-        
-        <!-- Flash blanc pour la prise de photo -->
+        <div id="cameraInterface" class="w-100 h-100 d-flex flex-column gap-3">
+            <div id="cameraErrorBanner" class="alert alert-danger d-none d-flex flex-column flex-lg-row gap-3 align-items-start" role="alert">
+                <div class="flex-grow-1">
+                    <strong>Impossible d'accéder à la caméra.</strong>
+                    <div id="cameraErrorBannerText" class="mt-2"></div>
+                    <div id="cameraErrorBannerDetails" class="small text-muted mt-2"></div>
+                </div>
+                <div class="d-flex flex-column gap-2">
+                    <button class="btn btn-outline-light btn-sm" id="cameraRetryButton">
+                        <i class="fas fa-sync-alt me-2"></i>
+                        Re-tester l'accès caméra
+                    </button>
+                    <button class="btn btn-outline-warning btn-sm" id="cameraDiagnosticButton">
+                        <i class="fas fa-stethoscope me-2"></i>
+                        Diagnostic caméra
+                    </button>
+                </div>
+            </div>
+
+            <div class="d-flex flex-wrap align-items-center justify-content-between gap-3">
+                <div class="d-flex align-items-center gap-2 text-white">
+                    <i class="fas fa-video"></i>
+                    <label for="cameraDeviceSelect" class="mb-0">Caméra</label>
+                    <select id="cameraDeviceSelect" class="form-select form-select-sm" style="min-width: 220px;"></select>
+                </div>
+                <div class="text-white-50 small" id="cameraStatusHint">
+                    Plan A : WebRTC / Plan B : MJPEG Picamera2
+                </div>
+            </div>
+
+            <div id="cameraVideoWrapper" class="position-relative flex-grow-1 d-flex align-items-center justify-content-center">
+                <video id="cameraVideo"
+                       autoplay
+                       playsinline
+                       muted
+                       class="w-100 h-100"
+                       style="max-width: calc(100vw - 2rem); max-height: calc(100vh - 2rem); object-fit: contain; background-color: #000; border-radius: 15px; box-shadow: 0 8px 32px rgba(0,0,0,0.5);">
+                </video>
+                <img id="cameraFallbackImage"
+                     class="d-none w-100 h-100"
+                     style="max-width: calc(100vw - 2rem); max-height: calc(100vh - 2rem); object-fit: contain; background-color: #000; border-radius: 15px; box-shadow: 0 8px 32px rgba(0,0,0,0.5);"
+                     alt="Flux MJPEG caméra">
+                <span id="planBBadge" class="badge bg-warning text-dark position-absolute top-0 start-0 m-3 d-none">Plan B (MJPEG)</span>
+            </div>
+        </div>
+
+    <!-- Countdown overlay -->
+    <div class="countdown d-none position-absolute top-50 start-50 translate-middle" id="countdown"></div>
+
+    <!-- Flash blanc pour la prise de photo -->
         <div class="flash-overlay d-none position-fixed top-0 start-0 w-100 h-100" id="flashOverlay" 
              style="background-color: white; z-index: 15; display: flex; align-items: center; justify-content: center;">
             <div style="font-size: 8rem; font-weight: bold; color: black; text-shadow: none;">CHEESE!</div>
@@ -77,7 +119,7 @@
             </div>
         </div>
     </div>
-    
+
     <!-- Alerte manque de papier -->
     <div class="position-fixed top-0 start-50 translate-middle-x mt-3" style="z-index: 20; width: 90%; max-width: 500px;">
         <div class="alert alert-warning d-none d-flex align-items-center" id="paper-alert" style="border-radius: 15px; box-shadow: 0 4px 15px rgba(0,0,0,0.3);">
@@ -85,6 +127,34 @@
             <div>
                 <strong>Attention !</strong><br>
                 <small>Vérifiez le papier de l'imprimante avant de prendre une photo</small>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Modale diagnostic caméra -->
+<div class="modal fade" id="cameraDiagnosticModal" tabindex="-1" aria-labelledby="cameraDiagnosticModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header bg-dark text-white">
+                <h5 class="modal-title" id="cameraDiagnosticModalLabel">
+                    <i class="fas fa-stethoscope me-2"></i>
+                    Diagnostic caméra
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Fermer"></button>
+            </div>
+            <div class="modal-body">
+                <p class="text-muted small mb-3">Dernière exécution : <span id="cameraDiagnosticTimestamp">–</span></p>
+                <h6>Caméras détectées par le navigateur</h6>
+                <ul id="cameraDiagnosticDevices" class="list-group mb-4"></ul>
+                <h6>État backend <code>/camera/health</code></h6>
+                <pre id="cameraHealthDump" class="bg-dark text-success p-3 rounded" style="min-height: 160px; max-height: 320px; overflow: auto; font-size: 0.85rem;"></pre>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">
+                    <i class="fas fa-times me-2"></i>
+                    Fermer
+                </button>
             </div>
         </div>
     </div>
@@ -164,15 +234,38 @@
 {% endblock %}
 
 {% block scripts %}
-<script>
+<script type="module">
+import { CameraClient } from "/static/js/cameraClient.js";
+
 let isCapturing = false;
 let usbManagerModal = null;
 let usbPhotos = [];
 let selectedUsbPhotoName = null;
+let cameraClient = null;
 
-// Initialiser la caméra au chargement de la page
-document.addEventListener('DOMContentLoaded', function() {
-    initCamera();
+document.addEventListener('DOMContentLoaded', async () => {
+    try {
+        cameraClient = new CameraClient({
+            videoElement: document.getElementById('cameraVideo'),
+            fallbackImage: document.getElementById('cameraFallbackImage'),
+            planBBadge: document.getElementById('planBBadge'),
+            errorBanner: document.getElementById('cameraErrorBanner'),
+            errorBannerText: document.getElementById('cameraErrorBannerText'),
+            errorBannerDetails: document.getElementById('cameraErrorBannerDetails'),
+            deviceSelect: document.getElementById('cameraDeviceSelect'),
+            diagnosticsModal: document.getElementById('cameraDiagnosticModal'),
+            diagnosticsDevicesList: document.getElementById('cameraDiagnosticDevices'),
+            diagnosticsHealthPre: document.getElementById('cameraHealthDump'),
+            diagnosticsTimestamp: document.getElementById('cameraDiagnosticTimestamp'),
+            retryButton: document.getElementById('cameraRetryButton'),
+            diagnosticButton: document.getElementById('cameraDiagnosticButton')
+        });
+        await cameraClient.initialise();
+        window.SimpleBoothCameraClient = cameraClient;
+    } catch (error) {
+        console.error('Erreur lors de l\'initialisation de la caméra', error);
+    }
+
     const refreshBtn = document.getElementById('usbRefreshBtn');
     if (refreshBtn) {
         refreshBtn.addEventListener('click', () => refreshUsbPhotos());
@@ -186,47 +279,6 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
 });
-
-function initCamera() {
-    try {
-        console.log('Initialisation du flux vidéo caméra...');
-        
-        const videoPreview = document.getElementById('videoPreview');
-        
-        // Gérer les erreurs de chargement du flux
-        videoPreview.onerror = function() {
-            console.error('Erreur de chargement du flux vidéo');
-            showCameraError();
-        };
-        
-        // Gérer le chargement réussi
-        videoPreview.onload = function() {
-            console.log('Flux vidéo caméra démarré avec succès');
-        };
-        
-        // Démarrer le flux via l'API
-        fetch('/start_camera')
-            .then(response => response.json())
-            .then(data => {
-                console.log('Caméra initialisée:', data.status);
-            })
-            .catch(error => {
-                console.error('Erreur d\'initialisation caméra:', error);
-            });
-        
-    } catch (error) {
-        console.error('Erreur d\'accès à la caméra:', error);
-        showCameraError();
-    }
-}
-
-function showCameraError() {
-    document.getElementById('videoContainer').innerHTML =
-        '<div class="alert alert-warning m-3">' +
-        '<i class="fas fa-exclamation-triangle me-2"></i>' +
-        'Impossible d\'accéder à la caméra. Vérifiez la configuration (USB ou libcamera) et la connexion de la caméra.' +
-        '</div>';
-}
 
 function capturePhoto() {
     if (isCapturing) return;
@@ -296,11 +348,19 @@ async function takePicture() {
 function openUsbManager() {
     if (!usbManagerModal) {
         const modalElement = document.getElementById('usbManagerModal');
-        usbManagerModal = new bootstrap.Modal(modalElement);
+        const modalLib = window.bootstrap;
+        if (!modalLib || !modalLib.Modal) {
+            console.warn('Bootstrap Modal non disponible');
+            return;
+        }
+        usbManagerModal = new modalLib.Modal(modalElement);
     }
     refreshUsbPhotos();
     usbManagerModal.show();
 }
+
+window.capturePhoto = capturePhoto;
+window.openUsbManager = openUsbManager;
 
 async function refreshUsbPhotos(showToastOnError = false) {
     const container = document.getElementById('usbPhotosContainer');
