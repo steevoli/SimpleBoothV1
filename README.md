@@ -106,41 +106,61 @@ Suivez ces étapes pour une installation manuelle.
 
 ## Utilisation
 
-1. **Lancer l'application :**
-```bash
-python3 app.py
-```
+1. **Préparer la caméra (à faire une seule fois)**
+   - Activer la caméra via `sudo raspi-config` (Interface Options → Camera) et redémarrer si demandé.
+   - Lancer le script d'installation caméra :
+     ```bash
+     chmod +x scripts/setup_camera.sh
+     ./scripts/setup_camera.sh
+     ```
+     Ce script installe `python3-picamera2`, `python3-opencv`, `libcamera-apps`, ajoute l'utilisateur au groupe `video` et teste `libcamera-still`.
+   - Sur Chromium/Kiosk, autoriser explicitement l'accès à la caméra pour l'URL du photobooth.
 
-2. **Accéder à l'interface :**
+2. **Lancer le backend caméra (Plan B MJPEG + santé)**
+   ```bash
+   python3 server/app.py
+   ```
+   Ce service écoute par défaut sur `http://localhost:8080` et expose :
+   - `/camera/stream` : flux MJPEG de secours utilisable directement (`<img src="http://localhost:8080/camera/stream">`).
+   - `/camera/health` : diagnostic JSON (présence Picamera2, groupe video, /dev/video*, dernier frame, erreurs récentes).
+
+3. **Lancer l'application principale :**
+   ```bash
+   python3 app.py
+   ```
+
+4. **Accéder à l'interface :**
    - Ouvrir un navigateur sur `http://localhost:5000`
    - Ou depuis un autre appareil : `http://[IP_RASPBERRY]:5000`
 
-3. **Administration :**
+5. **Administration :**
    - Accéder à `/admin` pour configurer l'application
 
 ## Configuration des caméras
 
-L'application supporte deux types de caméras, configurables depuis la page d'administration :
+Le frontal tente désormais automatiquement deux plans complémentaires :
 
-### Pi Camera (par défaut)
+- **Plan A – WebRTC (getUserMedia)** :
+  1. Contrainte minimale `{ video: true }`
+  2. Contrainte 1080p `{ video: { width: { ideal: 1920 }, height: { ideal: 1080 } } }`
+  3. Contrainte ciblée sur le `deviceId` choisi dans la liste déroulante.
+  Les erreurs détaillées (`NotAllowedError`, `NotReadableError`, etc.) sont affichées dans une bannière, et un bouton "Re-tester" relance la séquence.
 
-- Utilise le module `libcamera-vid` pour capturer le flux vidéo
-- Idéal pour les Raspberry Pi avec caméra officielle
-- Aucune configuration supplémentaire requise
+- **Plan B – Flux MJPEG** :
+  Si tous les essais WebRTC échouent, le composant bascule automatiquement sur le flux `/camera/stream` du backend. Un badge "Plan B (MJPEG)" indique le mode actif.
 
-### Caméra USB
+### Outil de diagnostic intégré
 
-- Utilise OpenCV (`cv2`) pour capturer le flux vidéo
-- Compatible avec la plupart des webcams USB standard
-- Configuration dans l'admin :
-  1. Sélectionner "Caméra USB" dans les options de caméra
-  2. Spécifier l'ID de la caméra (généralement `0` pour la première caméra)
-  3. Si vous avez plusieurs caméras USB, essayez les IDs `1`, `2`, etc.
+- Bouton "Diagnostic caméra" dans l'interface principale.
+- Affiche la liste des périphériques vidéo détectés par le navigateur (`enumerateDevices`).
+- Interroge `/camera/health` et affiche l'état (module Picamera2 présent, appartenance au groupe video, `/dev/video*`, horodatage du dernier frame, erreurs récentes).
+- Journalisation enrichie côté console (front et backend) pour faciliter la résolution d'incidents.
 
-> **Note** : Si vous rencontrez des problèmes avec la caméra USB, vérifiez que :
-> - La caméra est bien connectée et alimentée
-> - Les permissions sont correctes (`sudo usermod -a -G video $USER`)
-> - La caméra est compatible avec OpenCV
+### Bonnes pratiques
+
+- Après ajout au groupe `video`, redémarrer la session utilisateur ou le Raspberry Pi.
+- Débrancher/rebrancher une webcam USB problématique et relancer le diagnostic.
+- En cas d'absence totale de caméra, le diagnostic indique précisément la cause (module manquant, droits, périphériques absents).
 
 ## 📂 Structure des fichiers
 
