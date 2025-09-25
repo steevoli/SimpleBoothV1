@@ -43,6 +43,8 @@ logger = logging.getLogger(__name__)
 # Initialiser les dossiers nécessaires
 ensure_directories()
 
+CAMERA_SERVER_URL = os.environ.get('CAMERA_SERVER_URL', 'http://localhost:8080')
+
 def check_printer_status():
     """Vérifier l'état de l'imprimante thermique"""
     try:
@@ -164,6 +166,48 @@ last_frame = None
 frame_lock = threading.Lock()
 
 
+def fetch_plan_b_frame(camera_server_base: str, timeout: float = 5.0) -> Optional[bytes]:
+    """Récupère une frame JPEG depuis le flux MJPEG du serveur Plan B."""
+
+    if not camera_server_base:
+        return None
+
+    stream_url = f"{camera_server_base.rstrip('/')}/camera/stream"
+    logger.info("[PLAN B] Capture d'une frame via %s", stream_url)
+
+    try:
+        start_time = time.time()
+        with requests.get(stream_url, stream=True, timeout=(3, timeout)) as response:
+            response.raise_for_status()
+
+            buffer = b''
+            for chunk in response.iter_content(chunk_size=4096):
+                if not chunk:
+                    continue
+
+                buffer += chunk
+
+                start_marker = buffer.find(b'\xff\xd8')
+                if start_marker == -1:
+                    if len(buffer) > 2_000_000:
+                        buffer = buffer[-1_000_000:]
+                    continue
+
+                end_marker = buffer.find(b'\xff\xd9', start_marker + 2)
+                if end_marker != -1:
+                    frame = buffer[start_marker:end_marker + 2]
+                    logger.info("[PLAN B] Frame MJPEG récupérée (%d octets)", len(frame))
+                    return frame
+
+                if time.time() - start_time > timeout:
+                    raise TimeoutError("Temps dépassé lors de la récupération de la frame Plan B")
+
+    except Exception as exc:
+        logger.error("[PLAN B] Impossible de récupérer une frame: %s", exc)
+
+    return None
+
+
 def _resolve_current_photo_path() -> Optional[Path]:
     """Retourne le chemin absolu de la photo en cours."""
 
@@ -178,35 +222,54 @@ def _resolve_current_photo_path() -> Optional[Path]:
 
 @app.route('/capture', methods=['POST'])
 def capture_photo():
-    """Capturer la frame MJPEG actuelle directement depuis le flux vidéo"""
+    """Capturer la frame actuelle depuis le flux actif (Plan A ou Plan B)."""
     global current_photo, last_frame
-    
+
     try:
         # Générer un nom de fichier unique
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         filename = f'photo_{timestamp}.jpg'
         filepath = os.path.join(PHOTOS_FOLDER, filename)
-        
+
+        request_data = request.get_json(silent=True) or {}
+        requested_plan_b = bool(request_data.get('planB'))
+        camera_server_base = request_data.get('cameraServerBase') or CAMERA_SERVER_URL
+
         # Capturer la frame actuelle du flux MJPEG
         with frame_lock:
-            if last_frame is not None:
-                # Sauvegarder la frame directement
-                with open(filepath, 'wb') as f:
-                    f.write(last_frame)
-                
-                current_photo = filename
-                logger.info(f"Frame MJPEG capturée avec succès: {filename}")
-                
-                # Envoyer sur Telegram si activé
-                send_type = config.get('telegram_send_type', 'photos')
-                if send_type in ['photos', 'both']:
-                    threading.Thread(target=send_to_telegram, args=(filepath, config, "photo")).start()
-                
-                return jsonify({'success': True, 'filename': filename})
-            else:
-                logger.info("Aucune frame disponible dans le flux")
-                return jsonify({'success': False, 'error': 'Aucune frame disponible'})
-            
+            frame_bytes = last_frame
+
+        use_plan_b = requested_plan_b or frame_bytes is None
+
+        if use_plan_b:
+            plan_b_frame = fetch_plan_b_frame(camera_server_base)
+            if plan_b_frame is None:
+                logger.info("Plan B indisponible pour la capture")
+                error_message = "Flux Plan B indisponible. Vérifiez le service caméra (port 8080)."
+                return jsonify({'success': False, 'error': error_message})
+
+            frame_bytes = plan_b_frame
+            with frame_lock:
+                last_frame = frame_bytes
+
+        if frame_bytes is None:
+            logger.info("Aucune frame disponible dans le flux")
+            return jsonify({'success': False, 'error': 'Aucune frame disponible'})
+
+        # Sauvegarder la frame directement
+        with open(filepath, 'wb') as f:
+            f.write(frame_bytes)
+
+        current_photo = filename
+        logger.info(f"Frame MJPEG capturée avec succès: {filename}")
+
+        # Envoyer sur Telegram si activé
+        send_type = config.get('telegram_send_type', 'photos')
+        if send_type in ['photos', 'both']:
+            threading.Thread(target=send_to_telegram, args=(filepath, config, "photo")).start()
+
+        return jsonify({'success': True, 'filename': filename})
+
     except Exception as e:
         logger.info(f"Erreur lors de la capture: {e}")
         return jsonify({'success': False, 'error': f'Erreur de capture: {str(e)}'})
