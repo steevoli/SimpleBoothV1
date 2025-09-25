@@ -16,3 +16,17 @@ La fonction utilitaire `get_usb_mount_point()` retourne le premier point de mont
 - La création de miniatures exploite directement les fichiers originaux : de nombreuses images lourdes peuvent ralentir le chargement initial.
 - Les suppressions utilisent une confirmation navigateur standard.
 - Si aucune clé USB n'est branchée ou si les permissions manquent, l'interface affiche un message dédié et aucune action destructive n'est réalisée.
+
+## Dépannage « Permission refusée »
+Un utilitaire en ligne de commande est fourni pour diagnostiquer et corriger
+les problèmes d'accès à la clé :
+
+```bash
+python scripts/usb_permission_fix.py
+```
+
+Le script détecte automatiquement la clé, vérifie que le dossier
+`SimpleBooth/` est accessible en écriture puis tente plusieurs correctifs
+(`remount,rw`, `chmod`). Consultez les logs pour connaître les actions menées
+et effectuez, si nécessaire, les vérifications matérielles décrites dans la
+documentation précédente.
