@@ -710,9 +710,9 @@ def download_photo(filename):
         flash(f'Erreur lors du téléchargement: {str(e)}', 'error')
         return redirect(url_for('admin'))
 
-@app.route('/admin/reprint_photo/<filename>', methods=['POST'])
-def reprint_photo(filename):
-    """Réimprimer une photo spécifique"""
+@app.route('/admin/save_photo/<filename>', methods=['POST'])
+def save_photo(filename):
+    """Sauvegarder une photo spécifique"""
     try:
         # Chercher la photo dans les deux dossiers
         photo_path = None
@@ -748,18 +748,18 @@ def reprint_photo(filename):
             result = subprocess.run(cmd, capture_output=True, text=True, cwd=os.path.dirname(os.path.abspath(__file__)))
             
             if result.returncode == 0:
-                flash('Photo réimprimée avec succès!', 'success')
+                flash('Photo sauvegardée avec succès!', 'success')
             else:
                 error_msg = result.stderr.strip() if result.stderr else 'Erreur inconnue'
                 if 'ModuleNotFoundError' in error_msg and 'escpos' in error_msg:
                     flash('Module escpos manquant. Installez-le avec: pip install python-escpos', 'error')
                 else:
-                    flash(f'Erreur d\'impression: {error_msg}', 'error')
+                    flash(f'Erreur lors de la sauvegarde: {error_msg}', 'error')
         else:
             flash('Photo introuvable', 'error')
     except Exception as e:
-        flash(f'Erreur lors de la réimpression: {str(e)}', 'error')
-    
+        flash(f'Erreur lors de la sauvegarde: {str(e)}', 'error')
+
     return redirect(url_for('admin'))
 
 @app.route('/api/slideshow')
