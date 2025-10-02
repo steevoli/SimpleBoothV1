@@ -84,6 +84,7 @@
         transform: translateX(-50%);
         max-width: 90vw;
         z-index: 20;
+        margin: 0;
     }
 
     .countdown {
@@ -132,7 +133,11 @@
     }
     </style>
 
-    <div id="cameraErrorBanner" class="alert alert-warning d-none camera-error-banner" role="alert">
+    <div id="cameraErrorBanner"
+         class="alert alert-warning d-none camera-error-banner"
+         role="alert"
+         data-auto-hide-mode="auto"
+         data-auto-hide-delay="3000">
         <div id="cameraErrorBannerTitle" class="fw-bold">Statut caméra</div>
         <div id="cameraErrorBannerText" class="mt-2"></div>
         <div id="cameraErrorBannerDetails" class="small text-muted mt-2"></div>
@@ -320,6 +325,15 @@ const diagnosticsModal = document.getElementById('cameraDiagnosticModal');
 const diagnosticsDevicesList = document.getElementById('cameraDiagnosticDevices');
 const diagnosticsHealthPre = document.getElementById('cameraHealthDump');
 const diagnosticsTimestamp = document.getElementById('cameraDiagnosticTimestamp');
+const DEFAULT_CAMERA_MESSAGE_HIDE_DELAY = 3000;
+const rawCameraMessageMode = (errorBanner?.dataset?.autoHideMode || 'auto').toLowerCase();
+const cameraMessageAutoHideMode = rawCameraMessageMode === 'delay' ? 'delay' : 'auto';
+let parsedCameraMessageDelay = parseInt(errorBanner?.dataset?.autoHideDelay ?? '', 10);
+if (Number.isNaN(parsedCameraMessageDelay) || parsedCameraMessageDelay < 0) {
+    parsedCameraMessageDelay = DEFAULT_CAMERA_MESSAGE_HIDE_DELAY;
+}
+const cameraMessageHideDelay = parsedCameraMessageDelay;
+let cameraMessageHideTimeoutId = null;
 
 document.addEventListener('DOMContentLoaded', async () => {
     await initialiseCamera();
@@ -362,8 +376,10 @@ function showCameraMessage(message, details = '', variant = 'warning', title = '
         return;
     }
 
+    clearTimeout(cameraMessageHideTimeoutId);
     errorBanner.classList.remove('d-none', 'alert-danger', 'alert-warning', 'alert-info', 'alert-success');
     errorBanner.classList.add(`alert-${variant}`);
+    errorBanner.style.display = 'block';
 
     if (errorBannerTitle) {
         errorBannerTitle.textContent = title;
@@ -381,14 +397,31 @@ function hideCameraMessage() {
     if (!errorBanner) {
         return;
     }
+    clearTimeout(cameraMessageHideTimeoutId);
+    cameraMessageHideTimeoutId = null;
     errorBanner.classList.add('d-none');
     errorBanner.classList.remove('alert-danger', 'alert-warning', 'alert-info', 'alert-success');
+    errorBanner.style.display = 'none';
     if (errorBannerText) {
         errorBannerText.textContent = '';
     }
     if (errorBannerDetails) {
         errorBannerDetails.textContent = '';
         errorBannerDetails.classList.add('d-none');
+    }
+}
+
+function autoHideCameraMessage(mode = cameraMessageAutoHideMode) {
+    if (!errorBanner) {
+        return;
+    }
+    clearTimeout(cameraMessageHideTimeoutId);
+    if (mode === 'delay' && cameraMessageHideDelay > 0) {
+        cameraMessageHideTimeoutId = window.setTimeout(() => {
+            hideCameraMessage();
+        }, cameraMessageHideDelay);
+    } else {
+        hideCameraMessage();
     }
 }
 
@@ -444,6 +477,7 @@ async function updateCameraHealthIndicator() {
     const result = await requestCameraHealth();
     if (result.ok) {
         setStatusChip('Caméra locale prête', 'success');
+        autoHideCameraMessage();
     } else {
         setStatusChip('Caméra locale indisponible', 'danger');
     }
@@ -508,7 +542,7 @@ async function startBrowserCamera() {
     if (planBBadge) {
         planBBadge.classList.add('d-none');
     }
-    hideCameraMessage();
+    autoHideCameraMessage();
 }
 
 function revokeFallbackUrl() {
