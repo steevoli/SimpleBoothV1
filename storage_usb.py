@@ -2,13 +2,21 @@
 from __future__ import annotations
 
 import logging
-import os
-import shutil
-import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import List, Optional
+
+from usb_utils import (
+    USB_ROOT,
+    UsbPathError,
+    UsbUnavailableError,
+    check_usb_health,
+    ensure_directory,
+    ensure_free_space,
+    ensure_usb_ready,
+    resolve_usb_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,104 +41,46 @@ class PhotoMeta:
         }
 
 
-def _iter_linux_mount_candidates() -> Iterable[Path]:
-    bases = [Path("/media"), Path("/run/media")]
-    for base in bases:
-        if not base.exists():
-            continue
-        for first_level in base.iterdir():
-            if not first_level.is_dir():
-                continue
-            # Certains systèmes montent directement à /media/USB
-            if _is_valid_mount(first_level):
-                yield first_level
-            for second_level in first_level.iterdir():
-                if second_level.is_dir():
-                    yield second_level
-
-
-def _iter_macos_mount_candidates() -> Iterable[Path]:
-    base = Path("/Volumes")
-    if base.exists():
-        for child in base.iterdir():
-            if child.is_dir():
-                yield child
-
-
-def _iter_windows_mount_candidates() -> Iterable[Path]:
-    try:
-        import ctypes
-
-        drive_bits = ctypes.windll.kernel32.GetLogicalDrives()
-        for letter in (f"{chr(65 + i)}:" for i in range(26)):
-            mask = 1 << (ord(letter[0]) - 65)
-            if not drive_bits & mask:
-                continue
-            drive_type = ctypes.windll.kernel32.GetDriveTypeW(f"{letter}\\")
-            # 2 = DRIVE_REMOVABLE
-            if drive_type == 2:
-                yield Path(f"{letter}\\")
-    except Exception as exc:  # pragma: no cover - dépend du système
-        logger.debug("[USB] Échec de détection Windows via ctypes: %s", exc)
-        # Fallback simple: lettres E à Z
-        for letter in "DEFGHIJKLMNOPQRSTUVWXYZ":
-            path = Path(f"{letter}:/")
-            if path.exists():
-                yield path
-
-
-def _is_valid_mount(path: Path) -> bool:
-    try:
-        if not path.exists() or not path.is_dir():
-            return False
-        # Éviter les montages système évidents
-        lower = path.name.lower()
-        if any(keyword in lower for keyword in ("system", "boot", "root", "efi")):
-            return False
-        # Vérifie que le chemin correspond à un point de montage réel quand possible
-        if hasattr(os.path, "ismount") and os.path.ismount(path):
-            return True
-        # Sur Windows certains lecteurs ne sont pas considérés comme montés
-        return True
-    except Exception as exc:
-        logger.debug("[USB] Chemin %s ignoré: %s", path, exc)
-        return False
-
-
 def get_usb_mount_point() -> Optional[Path]:
-    """Retourne le point de montage de la première clé USB détectée."""
+    """Retourne le point de montage configuré si disponible."""
 
-    logger.debug("[USB] Détection du point de montage USB...")
-    candidates: Iterable[Path]
-
-    if sys.platform.startswith("linux"):
-        candidates = _iter_linux_mount_candidates()
-    elif sys.platform.startswith("win"):
-        candidates = _iter_windows_mount_candidates()
-    elif sys.platform.startswith("darwin"):
-        candidates = _iter_macos_mount_candidates()
-    else:
-        candidates = []
-
-    for candidate in candidates:
-        if _is_valid_mount(candidate):
-            logger.info("[USB] Point de montage détecté: %s", candidate)
-            return candidate
-
-    logger.info("[USB] Aucune clé USB détectée")
+    health = check_usb_health()
+    if health.mounted:
+        return USB_ROOT
+    logger.info("[USB] Point de montage /mnt/usb indisponible: %s", health.message)
     return None
+
+
+def _rethrow_unavailable(exc: UsbUnavailableError) -> None:
+    if exc.code in {"not_mounted", "mount_point_missing", "not_a_directory"}:
+        raise FileNotFoundError(str(exc)) from exc
+    if exc.code in {"permission_denied", "read_only"}:
+        raise PermissionError(str(exc)) from exc
+    raise OSError(str(exc)) from exc
 
 
 def ensure_usb_folder_exists(subfolder: str = USB_DEFAULT_SUBFOLDER) -> Path:
     """S'assure que le dossier de sauvegarde existe sur la clé USB."""
 
-    mount_point = get_usb_mount_point()
-    if not mount_point:
-        raise FileNotFoundError("Aucune clé USB détectée")
-
-    destination = mount_point / subfolder
     try:
-        destination.mkdir(parents=True, exist_ok=True)
+        ensure_usb_ready(for_writing=True)
+    except UsbUnavailableError as exc:
+        _rethrow_unavailable(exc)
+
+    if subfolder:
+        try:
+            destination = resolve_usb_path(subfolder)
+        except UsbUnavailableError as exc:
+            _rethrow_unavailable(exc)
+        except UsbPathError as exc:
+            raise OSError(str(exc)) from exc
+        except Exception as exc:  # pragma: no cover - validation
+            raise OSError(str(exc)) from exc
+    else:
+        destination = USB_ROOT
+
+    try:
+        ensure_directory(destination)
     except PermissionError as exc:
         logger.error("[USB] Permission refusée pour créer %s: %s", destination, exc)
         raise
@@ -150,10 +100,13 @@ def _generate_timestamp_name(original: Path, dest_name_timestamped: bool) -> str
 
 
 def _check_free_space(destination: Path, file_size: int) -> None:
-    usage = shutil.disk_usage(destination)
-    if usage.free < file_size:
-        logger.error("[USB] Espace disque insuffisant: %s restant", usage.free)
-        raise OSError("Espace disque insuffisant sur la clé USB")
+    try:
+        ensure_free_space(destination, file_size)
+    except UsbUnavailableError as exc:
+        if exc.code == "no_space":
+            logger.error("[USB] Espace disque insuffisant sur %s", destination)
+            raise OSError(str(exc)) from exc
+        raise
 
 
 def _build_unique_path(destination_folder: Path, filename: str) -> Path:

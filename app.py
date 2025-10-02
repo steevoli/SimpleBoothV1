@@ -12,7 +12,10 @@ import logging
 import signal
 import atexit
 import base64
+import binascii
+import json
 import sys
+import pwd
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -33,6 +36,18 @@ from storage_usb import (
     save_photo_to_usb,
     delete_usb_photo,
 )
+from usb_utils import (
+    SAVE_DIR,
+    USB_ROOT,
+    UsbPathError,
+    UsbUnavailableError,
+    check_usb_health,
+    list_directory as usb_list_directory,
+    make_directory as usb_make_directory,
+    save_content as usb_save_content,
+)
+
+os.umask(0o022)
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'photobooth_secret_key_2024')
@@ -44,6 +59,85 @@ logger = logging.getLogger(__name__)
 ensure_directories()
 
 CAMERA_SERVER_URL = os.environ.get('CAMERA_SERVER_URL', 'http://localhost:8080')
+
+
+def log_usb_environment() -> None:
+    try:
+        user_name = pwd.getpwuid(os.geteuid()).pw_name
+    except Exception:
+        user_name = str(os.geteuid())
+
+    health = check_usb_health(test_write=False)
+    logger.info(
+        "[USB] Service lancé en tant que %s (uid=%s gid=%s)",
+        user_name,
+        os.geteuid(),
+        os.getegid(),
+    )
+    logger.info("[USB] Point de montage configuré: %s", USB_ROOT)
+    logger.info("[USB] Dossier de sauvegarde: %s", SAVE_DIR)
+    if health.mounted:
+        logger.info(
+            "[USB] Monté=%s, système de fichiers=%s, writable=%s, libre=%s octets",
+            health.mounted,
+            health.filesystem,
+            health.writable,
+            health.free_bytes,
+        )
+    else:
+        logger.warning("[USB] Clé USB indisponible: %s", health.message)
+
+
+log_usb_environment()
+
+
+def _parse_save_payload(payload: Optional[dict]):
+    if not payload:
+        raise ValueError("Requête JSON vide")
+
+    filename = payload.get('filename') if isinstance(payload, dict) else None
+    if not filename:
+        raise ValueError("Champ 'filename' requis")
+
+    encoding = (payload.get('encoding') or 'base64').lower()
+    content = payload.get('content')
+    if content is None:
+        raise ValueError("Champ 'content' requis")
+
+    if encoding == 'base64':
+        if not isinstance(content, str):
+            raise ValueError("Le contenu base64 doit être une chaîne")
+        try:
+            data = base64.b64decode(content, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise ValueError("Contenu base64 invalide") from exc
+    elif encoding == 'text':
+        if not isinstance(content, str):
+            raise ValueError("Le contenu texte doit être une chaîne")
+        data = content.encode('utf-8')
+    elif encoding == 'json':
+        data = json.dumps(content, ensure_ascii=False).encode('utf-8')
+    else:
+        raise ValueError("Encodage non supporté")
+
+    subdir = payload.get('subdir')
+    if isinstance(subdir, str):
+        subdir = subdir.strip() or None
+    elif subdir is not None:
+        subdir = str(subdir)
+    return filename, data, subdir
+
+
+def _usb_unavailable_response(exc: UsbUnavailableError):
+    logger.error("[USB] %s", exc)
+    return (
+        jsonify({
+            'success': False,
+            'error': str(exc),
+            'code': exc.code,
+        }),
+        exc.status_code,
+    )
 
 def check_printer_status():
     """Vérifier l'état de l'imprimante thermique"""
@@ -282,6 +376,99 @@ def review_photo():
         return redirect(url_for('index'))
     return render_template('review.html', photo=current_photo, config=config)
 
+
+@app.route('/usb/health', methods=['GET'])
+def usb_health():
+    """Indique l'état courant du point de montage USB."""
+
+    test_write = request.args.get('test_write', '1')
+    test_write_enabled = str(test_write).lower() not in {'0', 'false', 'no'}
+    health = check_usb_health(test_write=test_write_enabled)
+    payload = health.to_dict()
+    payload['success'] = health.mounted and (health.writable or not test_write_enabled)
+    status_code = 200 if payload['success'] else 503
+    return jsonify(payload), status_code
+
+
+@app.route('/usb/list', methods=['GET'])
+def usb_list_directory_route():
+    """Liste le contenu d'un dossier sur la clé USB."""
+
+    relative_path = request.args.get('path', '').strip()
+    try:
+        listing = usb_list_directory(relative_path)
+        listing['success'] = True
+        return jsonify(listing)
+    except UsbUnavailableError as exc:
+        return _usb_unavailable_response(exc)
+    except UsbPathError as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 403
+    except FileNotFoundError as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 404
+    except NotADirectoryError as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 400
+
+
+@app.route('/usb/mkdir', methods=['POST'])
+def usb_make_directory_route():
+    """Crée un dossier dans la clé USB."""
+
+    payload = request.get_json(silent=True) or {}
+    target = payload.get('path')
+    if not target:
+        return jsonify({'success': False, 'error': "Champ 'path' requis"}), 400
+
+    try:
+        created = usb_make_directory(target)
+    except UsbUnavailableError as exc:
+        return _usb_unavailable_response(exc)
+    except UsbPathError as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 403
+    except PermissionError as exc:
+        logger.error("[USB] Permission refusée pour mkdir %s: %s", target, exc)
+        return jsonify({'success': False, 'error': str(exc)}), 403
+    except OSError as exc:
+        logger.error("[USB] Erreur lors de la création de dossier USB: %s", exc)
+        return jsonify({'success': False, 'error': str(exc)}), 500
+
+    relative = str(created.relative_to(USB_ROOT))
+    return jsonify({
+        'success': True,
+        'path': relative,
+        'absolute_path': str(created),
+    }), 201
+
+
+@app.route('/save', methods=['POST'])
+def usb_save_route():
+    """Sauvegarde un contenu arbitraire dans le dossier de sauvegarde USB."""
+
+    payload = request.get_json(silent=True)
+    try:
+        filename, data, subdir = _parse_save_payload(payload)
+        saved_path = usb_save_content(filename, data, subdir=subdir)
+    except ValueError as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 400
+    except UsbPathError as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 403
+    except UsbUnavailableError as exc:
+        return _usb_unavailable_response(exc)
+    except PermissionError as exc:
+        logger.error("[USB] Permission refusée pour sauvegarder %s: %s", payload, exc)
+        return jsonify({'success': False, 'error': str(exc)}), 403
+    except OSError as exc:
+        logger.error("[USB] Erreur lors de la sauvegarde USB: %s", exc)
+        return jsonify({'success': False, 'error': str(exc)}), 500
+
+    relative = str(saved_path.relative_to(USB_ROOT))
+    return jsonify({
+        'success': True,
+        'path': relative,
+        'absolute_path': str(saved_path),
+        'size': len(data),
+    }), 201
+
+
 @app.route('/save_photo_usb', methods=['POST'])
 @app.route('/print_photo', methods=['POST'])
 def save_photo_usb_route():
@@ -299,6 +486,8 @@ def save_photo_usb_route():
             'message': 'Photo sauvegardée avec succès',
             'path': str(saved_path),
         })
+    except UsbUnavailableError as exc:
+        return _usb_unavailable_response(exc)
     except FileNotFoundError as exc:
         error_message = 'Aucune clé USB détectée'
         if str(exc) and str(exc) != 'Aucune clé USB détectée':
@@ -330,6 +519,8 @@ def usb_photos():
             'photos': photos,
             'mount_point': str(mount_point) if mount_point else None,
         })
+    except UsbUnavailableError as exc:
+        return _usb_unavailable_response(exc)
     except FileNotFoundError:
         logger.warning("[USB] Liste impossible: aucune clé détectée")
         return jsonify({'success': False, 'error': 'Aucune clé USB détectée.'}), 404
@@ -368,6 +559,8 @@ def delete_usb_photo_route(filename):
         if not removed:
             return jsonify({'success': False, 'error': 'Photo introuvable sur la clé USB.'}), 404
         return jsonify({'success': True})
+    except UsbUnavailableError as exc:
+        return _usb_unavailable_response(exc)
     except FileNotFoundError:
         return jsonify({'success': False, 'error': 'Aucune clé USB détectée.'}), 404
     except PermissionError:

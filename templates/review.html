@@ -160,6 +160,21 @@ async function savePhotoToUsb(button) {
     const overlayContent = document.getElementById('saveOverlayContent');
     const originalContent = button.innerHTML;
 
+    let healthData;
+    try {
+        const healthResponse = await fetch('/usb/health');
+        healthData = await healthResponse.json();
+        if (!healthResponse.ok || !healthData.mounted || !healthData.writable) {
+            const message = healthData.message || 'Clé USB indisponible (non montée ou lecture seule)';
+            showToast(message, 'error');
+            return;
+        }
+    } catch (error) {
+        console.error('Erreur lors de la vérification USB:', error);
+        showToast('Impossible de vérifier la clé USB.', 'error');
+        return;
+    }
+
     button.disabled = true;
     button.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Sauvegarde...';
 
