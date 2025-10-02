@@ -1,0 +1,13 @@
+[Unit]
+Description=SimpleBooth Camera Service
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/pi/camera_service
+ExecStart=/usr/bin/python3 /home/pi/camera_service/app.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

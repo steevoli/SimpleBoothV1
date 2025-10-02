@@ -127,13 +127,52 @@ Suivez ces étapes pour une installation manuelle.
      Ce script installe `python3-picamera2`, `python3-opencv`, `libcamera-apps`, ajoute l'utilisateur au groupe `video` et teste `libcamera-still`.
    - Sur Chromium/Kiosk, autoriser explicitement l'accès à la caméra pour l'URL du photobooth.
 
-2. **Lancer le backend caméra (Plan B MJPEG + santé)**
+2. **Installer et lancer le service caméra local (port 8080)**
+
+   Installer les dépendances système nécessaires à Picamera2 :
+
    ```bash
-   python3 server/app.py
+   sudo apt update
+   sudo apt install -y python3-picamera2 libcamera-tools
    ```
-   Ce service écoute par défaut sur `http://localhost:8080` et expose :
-   - `/camera/stream` : flux MJPEG de secours utilisable directement (`<img src="http://localhost:8080/camera/stream">`).
-   - `/camera/health` : diagnostic JSON (présence Picamera2, groupe video, /dev/video*, dernier frame, erreurs récentes).
+
+   Puis installer les dépendances Python du micro-service (idéalement dans un environnement virtuel) :
+
+   ```bash
+   pip install -r camera_service/requirements.txt
+   ```
+
+   Lancer manuellement le service pour un test rapide :
+
+   ```bash
+   python3 camera_service/app.py
+   ```
+
+   Il écoute sur `http://localhost:8080` et expose :
+   - `GET /health` → état JSON de la caméra (`ok`, message d'erreur en cas d'indisponibilité).
+   - `GET /snapshot` → capture instantanée au format JPEG.
+
+   Vérifier que tout fonctionne :
+
+   ```bash
+   curl http://localhost:8080/health
+   curl -o test.jpg http://localhost:8080/snapshot
+   ```
+
+   Pour un démarrage automatique au boot, installer le service systemd fourni :
+
+   ```bash
+   sudo cp camera-service.service /etc/systemd/system/
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now camera-service
+   ```
+
+   Contrôle du service :
+
+   ```bash
+   sudo systemctl status camera-service
+   sudo journalctl -u camera-service -f
+   ```
 
 3. **Lancer l'application principale :**
    ```bash
@@ -149,16 +188,15 @@ Suivez ces étapes pour une installation manuelle.
 
 ## Configuration des caméras
 
-Le frontal tente désormais automatiquement deux plans complémentaires :
+Le frontal utilise désormais une fonction unique `takePhoto()` qui combine automatiquement deux stratégies :
 
-- **Plan A – WebRTC (getUserMedia)** :
-  1. Contrainte minimale `{ video: true }`
-  2. Contrainte 1080p `{ video: { width: { ideal: 1920 }, height: { ideal: 1080 } } }`
-  3. Contrainte ciblée sur le `deviceId` choisi dans la liste déroulante.
-  Les erreurs détaillées (`NotAllowedError`, `NotReadableError`, etc.) sont affichées dans une bannière, et un bouton "Re-tester" relance la séquence.
+- **Plan A – WebRTC (getUserMedia)** : tentative d'ouverture de la caméra navigateur avec la contrainte `{ video: { facingMode: "environment" } }`. En cas de succès, le flux est affiché dans la balise `<video>` et la capture se fait via un `<canvas>` local.
+- **Plan B – Capture HTTP** : si l'accès navigateur échoue (refus utilisateur, périphérique occupé, absence de caméra), l'application bascule sur le service local `http://localhost:8080/snapshot`. L'image JPEG renvoyée est affichée dans l'aperçu et utilisée pour la sauvegarde côté serveur.
 
-- **Plan B – Flux MJPEG** :
-  Si tous les essais WebRTC échouent, le composant bascule automatiquement sur le flux `/camera/stream` du backend. Un badge "Plan B (MJPEG)" indique le mode actif.
+Avant chaque déclenchement, `takePhoto()` interroge `http://localhost:8080/health` pour afficher le statut "Caméra locale prête / indisponible" dans le badge en haut à droite. La bannière d'alerte s'adapte automatiquement :
+
+- "Caméra navigateur refusée → bascule sur capture système (8080)…" lorsque l'utilisateur refuse la permission.
+- "Service caméra indisponible (8080). Vérifie qu'il tourne : sudo systemctl status camera-service." lorsque le micro-service est arrêté ou occupé.
 
 ### Outil de diagnostic intégré
 
@@ -172,6 +210,7 @@ Le frontal tente désormais automatiquement deux plans complémentaires :
 - Après ajout au groupe `video`, redémarrer la session utilisateur ou le Raspberry Pi.
 - Débrancher/rebrancher une webcam USB problématique et relancer le diagnostic.
 - En cas d'absence totale de caméra, le diagnostic indique précisément la cause (module manquant, droits, périphériques absents).
+- Pour éviter la popup de permission, ouvrir Chromium sur `http://localhost:5000` et autoriser la caméra de manière permanente (icône cadenas) ou lancer le navigateur en mode kiosque avec `--use-fake-ui-for-media-stream`.
 
 ## 📂 Structure des fichiers
 
@@ -186,6 +225,10 @@ SimpleBooth/
 ├── ScriptPythonPOS.py     # Script autonome pour l'impression thermique
 ├── setup.sh               # Script d'installation automatisée pour Raspberry Pi
 ├── requirements.txt       # Dépendances Python
+├── camera_service/        # Service Flask Picamera2 (port 8080)
+│   ├── app.py
+│   └── requirements.txt
+├── camera-service.service # Unité systemd pour le service caméra
 ├── static/                # Fichiers statiques
 │   └── camera-placeholder.svg
 ├── templates/             # Templates HTML (Jinja2)
