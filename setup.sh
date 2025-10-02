@@ -310,6 +310,8 @@ exec $CHROMIUM_PKG --kiosk --no-sandbox --disable-infobars \
   --no-default-browser-check \
   --no-first-run \
   --disable-component-update \
+  --use-fake-ui-for-media-stream \
+  --autoplay-policy=no-user-gesture-required \
   --lang=fr \
   http://localhost:5000
 EOF
