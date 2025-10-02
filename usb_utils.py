@@ -14,7 +14,8 @@ from typing import Iterable, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-USB_ROOT: Optional[Path] = None
+_USB_ROOT_ENV = os.environ.get("USB_ROOT", "")
+USB_ROOT: Optional[Path] = Path(_USB_ROOT_ENV) if _USB_ROOT_ENV else None
 SAVE_DIR: Optional[Path] = None
 
 
@@ -65,6 +66,7 @@ def _set_usb_paths(root: Optional[Path]) -> Tuple[Optional[Path], Optional[Path]
     resolved_root = _resolve_candidate(root)
     USB_ROOT = resolved_root
     save_dir = resolved_root / "sauvegardes"
+    SAVE_DIR = save_dir
     try:
         save_dir.mkdir(parents=True, exist_ok=True)
     except FileNotFoundError:
@@ -74,7 +76,6 @@ def _set_usb_paths(root: Optional[Path]) -> Tuple[Optional[Path], Optional[Path]
         logger.debug("[USB] Impossible de créer le dossier de sauvegarde %s: %s", save_dir, exc)
     except OSError as exc:
         logger.debug("[USB] Erreur lors de la création du dossier de sauvegarde %s: %s", save_dir, exc)
-    SAVE_DIR = save_dir
     _ensure_compat_symlink(USB_ROOT)
     return USB_ROOT, SAVE_DIR
 
@@ -82,9 +83,8 @@ def _set_usb_paths(root: Optional[Path]) -> Tuple[Optional[Path], Optional[Path]
 def find_usb_root() -> Optional[Path]:
     """Detect the USB root directory using the configured environment or heuristics."""
 
-    env_root = os.environ.get("USB_ROOT")
-    if env_root:
-        return _resolve_candidate(Path(env_root))
+    if _USB_ROOT_ENV:
+        return _resolve_candidate(Path(_USB_ROOT_ENV))
 
     candidates: List[Path] = []
     user_name = os.environ.get("USER") or os.environ.get("USERNAME")
@@ -286,7 +286,7 @@ def check_usb_health(test_write: bool = False) -> UsbHealth:
             message=f"Permission refusée sur {root}: {exc}",
         )
 
-    save_dir = SAVE_DIR or (root / "sauvegardes")
+    save_dir = (SAVE_DIR or (root / "sauvegardes")).resolve(strict=False)
     try:
         save_dir.mkdir(parents=True, exist_ok=True)
     except PermissionError as exc:
@@ -382,6 +382,11 @@ def _is_subpath(path: Path, parent: Path) -> bool:
 
 
 def _require_usb_root() -> Path:
+    global USB_ROOT
+    if USB_ROOT is None:
+        detected = find_usb_root()
+        if detected is not None:
+            _set_usb_paths(detected)
     if USB_ROOT is None:
         raise UsbUnavailableError("not_detected", "Clé USB non détectée.")
     return USB_ROOT
@@ -394,12 +399,20 @@ def ensure_directory(path: Path) -> Path:
 
 def ensure_save_directory(subdir: Optional[str] = None) -> Path:
     root = _require_usb_root()
-    destination = SAVE_DIR or (root / "sauvegardes")
-    ensure_directory(destination)
+    base_dir = (SAVE_DIR or (root / "sauvegardes")).resolve(strict=False)
+    if not _is_subpath(base_dir, root):
+        raise UsbPathError("Le dossier de sauvegarde est hors de la clé USB")
+    ensure_directory(base_dir)
+
     if subdir:
-        destination = resolve_usb_path(subdir, base=destination)
-        ensure_directory(destination)
-    return destination
+        relative_subdir = _ensure_relative_path(subdir)
+        candidate = (base_dir / relative_subdir).resolve(strict=False)
+        if not _is_subpath(candidate, root):
+            raise UsbPathError("Sous-dossier hors de la clé USB")
+        ensure_directory(candidate)
+        return candidate
+
+    return base_dir
 
 
 def validate_filename(filename: str) -> str:
@@ -435,6 +448,16 @@ def ensure_free_space(target_dir: Path, required_bytes: int) -> None:
     usage = shutil.disk_usage(target_dir)
     if usage.free < required_bytes:
         raise UsbUnavailableError("no_space", "Espace disque insuffisant sur la clé USB.", status_code=507)
+
+
+def prepare_save_path(filename: str, subdir: Optional[str] = None) -> Path:
+    validate_filename(filename)
+    root = _require_usb_root().resolve(strict=False)
+    target_dir = ensure_save_directory(subdir=subdir)
+    destination = (target_dir / filename).resolve(strict=False)
+    if not _is_subpath(destination, root):
+        raise UsbPathError("Chemin de sauvegarde hors de la clé USB")
+    return destination
 
 
 def list_directory(relative_path: str = "") -> dict:
@@ -480,11 +503,15 @@ def make_directory(relative_path: str) -> Path:
 
 
 def save_content(filename: str, data: bytes, subdir: Optional[str] = None) -> Path:
-    validate_filename(filename)
-    ensure_usb_ready(for_writing=True)
-    target_dir = ensure_save_directory(subdir=subdir)
-    ensure_free_space(target_dir, len(data))
-    destination = target_dir / filename
+    health = ensure_usb_ready(for_writing=True)
+    destination = prepare_save_path(filename, subdir=subdir)
+
+    data_size = len(data)
+    if health.free_bytes is not None and health.free_bytes < data_size:
+        raise UsbUnavailableError("no_space", "Espace disque insuffisant sur la clé USB.", status_code=507)
+
+    ensure_free_space(destination.parent, data_size)
+
     with open(destination, "wb") as fh:
         fh.write(data)
     return destination

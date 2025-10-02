@@ -191,13 +191,51 @@ Un lien symbolique `/mnt/usb` est créé automatiquement pour conserver la compa
    lsblk -f
    ```
 
-   Les exemples d'entrées `/etc/fstab` restent valables, quel que soit le point de montage réel :
+Les exemples d'entrées `/etc/fstab` restent valables, quel que soit le point de montage réel :
 
-   ```fstab
-   UUID=<UUID> /mnt/usb vfat defaults,uid=<UID>,gid=<GID>,umask=000,flush 0 0
-   UUID=<UUID> /mnt/usb exfat defaults,uid=<UID>,gid=<GID>,umask=000 0 0
-   UUID=<UUID> /mnt/usb ntfs defaults,uid=<UID>,gid=<GID>,umask=000 0 0
-   ```
+```fstab
+UUID=<UUID> /mnt/usb vfat defaults,uid=<UID>,gid=<GID>,umask=000,flush 0 0
+UUID=<UUID> /mnt/usb exfat defaults,uid=<UID>,gid=<GID>,umask=000 0 0
+UUID=<UUID> /mnt/usb ntfs defaults,uid=<UID>,gid=<GID>,umask=000 0 0
+```
+
+#### Configuration du service et diagnostics
+
+- **Chemin personnalisé** : pour imposer un point de montage précis, définissez la variable d'environnement `USB_ROOT`. Les chemins contenant des espaces doivent être entourés de guillemets, par exemple dans une unité systemd :
+
+  ```ini
+  Environment="USB_ROOT=/media/steeve/31 GB Volume"
+  ```
+
+- **Droits d'accès** : si le service tourne avec un utilisateur différent de celui qui a monté la clé (ex. `pi` vs `steeve`), deux approches sont possibles :
+  1. Démarrer le service avec `User=steeve` dans le fichier `.service`.
+  2. Monter la clé sur un point commun (ex. `/mnt/usb`) en précisant `uid=<UID>` et `gid=<GID>` dans `/etc/fstab` pour qu'ils correspondent à l'utilisateur système qui exécute Flask.
+
+- **Santé de la clé** : l'endpoint `GET /usb/health` renvoie un JSON détaillé :
+
+  ```json
+  {
+    "ok": true,
+    "user": "pi",
+    "path": "/media/steeve/31 GB Volume",
+    "mounted": true,
+    "writable": true,
+    "free_bytes": 123456789,
+    "message": null
+  }
+  ```
+
+  L'API renvoie `503` si la clé est absente ou non inscriptible et `507` en cas de manque d'espace. Les logs de démarrage affichent l'utilisateur effectif, le chemin retenu, la détectabilité du montage et l'espace libre pour faciliter le diagnostic.
+
+- **Tests rapides** :
+
+  ```bash
+  curl http://localhost:5000/usb/health
+  curl -X POST http://localhost:5000/save -H "Content-Type: application/json" \
+       -d '{"filename":"test.txt","content":"hello"}'
+  ```
+
+  Si la clé est retirée, ces appels retournent `503` avec un message explicite.
 
 #### Vérifier l'accès depuis l'API
 
