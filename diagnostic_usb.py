@@ -1,97 +1,65 @@
 #!/usr/bin/env python3
-"""Script de diagnostic pour le stockage USB du photobooth."""
-import os
-import stat
-import subprocess
+"""Diagnostic léger pour vérifier la disponibilité de la clé USB."""
+
+from __future__ import annotations
+
 import sys
-import tempfile
 from pathlib import Path
 
-from usb_utils import USB_ROOT, check_usb_health, pretty_print_health
+from usb_utils import SAVE_DIR, USB_ROOT, check_usb_health, ensure_save_directory, find_usb_root
 
 
-def run_command(command):
+def describe_path(path: Path | None) -> str:
+    if path is None:
+        return "(aucun)"
+    return str(path)
+
+
+def test_write(save_dir: Path) -> tuple[bool, str]:
+    probe = save_dir / ".__test__"
     try:
-        result = subprocess.run(command, check=True, text=True, capture_output=True)
-        return result.stdout.strip()
-    except subprocess.CalledProcessError as exc:
-        return exc.stderr.strip() or str(exc)
-    except FileNotFoundError:
-        return f"Commande introuvable: {' '.join(command)}"
-
-
-def format_permissions(path: Path) -> str:
-    try:
-        st = path.stat()
-    except FileNotFoundError:
-        return "Chemin introuvable"
-
-    mode = stat.filemode(st.st_mode)
-    try:
-        import pwd
-        import grp
-
-        owner = pwd.getpwuid(st.st_uid).pw_name
-        group = grp.getgrgid(st.st_gid).gr_name
-    except Exception:
-        owner = str(st.st_uid)
-        group = str(st.st_gid)
-    return f"{mode} {owner}:{group}"
-
-
-def test_write(path: Path) -> str:
-    if not path.exists():
-        return "Le dossier n'existe pas."
-    try:
-        with tempfile.NamedTemporaryFile(dir=path, prefix="usb_test_", delete=False) as tmp:
-            tmp.write(b"diagnostic")
-            temp_path = Path(tmp.name)
-        temp_path.unlink(missing_ok=True)
-        return "Succès : écriture autorisée."
-    except PermissionError as exc:
-        return f"Permission refusée: {exc}"
+        save_dir.mkdir(parents=True, exist_ok=True)
+        with open(probe, "wb") as fh:
+            fh.write(b"diagnostic")
+        probe.unlink(missing_ok=True)
+        return True, "succès"
     except OSError as exc:
-        return f"Erreur système: {exc}"
-
-
-def read_fstab_entries(mount_point: Path) -> str:
-    fstab = Path('/etc/fstab')
-    if not fstab.exists():
-        return "/etc/fstab introuvable"
-    lines = []
-    for line in fstab.read_text().splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith('#'):
-            continue
-        if str(mount_point) in stripped:
-            lines.append(stripped)
-    if not lines:
-        return "Aucune entrée dédiée trouvée."
-    return '\n'.join(lines)
+        try:
+            probe.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return False, f"échec ({exc})"
 
 
 def main() -> int:
+    detected = find_usb_root()
     print("=== Diagnostic USB ===")
-    print(f"Point de montage attendu : {USB_ROOT}")
+    print(f"Chemin détecté : {describe_path(detected)}")
+    print(f"Chemin courant : {describe_path(USB_ROOT)}")
 
     health = check_usb_health(test_write=True)
-    print("\n--- État rapporté par l'application ---")
-    print(pretty_print_health(health))
+    print("\n--- État ---")
+    print(f"Monté          : {health.mounted}")
+    print(f"Écriture OK    : {health.writable}")
+    print(f"Système de fichiers : {health.filesystem or '(inconnu)'}")
+    print(f"Espace libre   : {health.free_bytes if health.free_bytes is not None else '(inconnu)'}")
+    if health.message:
+        print(f"Message        : {health.message}")
+    if health.detail:
+        print(f"Code détail    : {health.detail}")
 
-    print("\n--- lsblk -f ---")
-    print(run_command(['lsblk', '-f']))
+    save_dir = SAVE_DIR or (detected / "sauvegardes" if detected else None)
+    print(f"\nDossier sauvegarde : {describe_path(save_dir)}")
 
-    print("\n--- Entrées /etc/fstab ---")
-    print(read_fstab_entries(USB_ROOT))
+    if health.mounted and health.writable and save_dir is not None:
+        ensure_save_directory()
+        ok, message = test_write(save_dir)
+        print(f"Test écriture  : {message}")
+        return 0 if ok else 1
 
-    print("\n--- Permissions du dossier ---")
-    print(format_permissions(USB_ROOT))
-
-    print("\n--- Test d'écriture ---")
-    print(test_write(USB_ROOT))
-
-    return 0
+    print("Test écriture  : ignoré (clé indisponible ou non inscriptible)")
+    return 1
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     sys.exit(main())

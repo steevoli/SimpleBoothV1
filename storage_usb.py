@@ -45,9 +45,9 @@ def get_usb_mount_point() -> Optional[Path]:
     """Retourne le point de montage configuré si disponible."""
 
     health = check_usb_health()
-    if health.mounted:
+    if health.mounted and USB_ROOT is not None:
         return USB_ROOT
-    logger.info("[USB] Point de montage /mnt/usb indisponible: %s", health.message)
+    logger.info("[USB] Point de montage USB indisponible: %s", health.message)
     return None
 
 
@@ -77,6 +77,8 @@ def ensure_usb_folder_exists(subfolder: str = USB_DEFAULT_SUBFOLDER) -> Path:
         except Exception as exc:  # pragma: no cover - validation
             raise OSError(str(exc)) from exc
     else:
+        if USB_ROOT is None:
+            raise OSError("Clé USB non détectée")
         destination = USB_ROOT
 
     try:

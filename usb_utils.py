@@ -10,12 +10,111 @@ import subprocess
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-USB_ROOT = Path(os.environ.get("USB_ROOT", "/mnt/usb")).resolve()
-SAVE_DIR = Path(os.environ.get("USB_SAVE_DIR", str(USB_ROOT / "sauvegardes"))).resolve()
+USB_ROOT: Optional[Path] = None
+SAVE_DIR: Optional[Path] = None
+
+
+def _resolve_candidate(path: Path) -> Path:
+    try:
+        return path.expanduser().resolve(strict=False)
+    except Exception:
+        return path.expanduser()
+
+
+def _ensure_compat_symlink(target: Optional[Path]) -> None:
+    symlink_path = Path("/mnt/usb")
+    try:
+        if target is None:
+            if symlink_path.is_symlink():
+                symlink_path.unlink()
+            return
+
+        if symlink_path.exists():
+            if symlink_path.is_symlink():
+                try:
+                    current_target = symlink_path.resolve(strict=False)
+                except Exception:
+                    current_target = None
+                if current_target != target:
+                    symlink_path.unlink()
+                    symlink_path.symlink_to(target)
+            else:
+                # Un dossier réel existe déjà, ne pas le remplacer
+                return
+        else:
+            symlink_path.parent.mkdir(parents=True, exist_ok=True)
+            symlink_path.symlink_to(target)
+    except PermissionError as exc:
+        logger.debug("[USB] Impossible de gérer le lien symbolique %s: %s", symlink_path, exc)
+    except OSError as exc:
+        logger.debug("[USB] Erreur lors de la création du lien symbolique %s: %s", symlink_path, exc)
+
+
+def _set_usb_paths(root: Optional[Path]) -> Tuple[Optional[Path], Optional[Path]]:
+    global USB_ROOT, SAVE_DIR
+    if root is None:
+        USB_ROOT = None
+        SAVE_DIR = None
+        _ensure_compat_symlink(None)
+        return USB_ROOT, SAVE_DIR
+
+    resolved_root = _resolve_candidate(root)
+    USB_ROOT = resolved_root
+    save_dir = resolved_root / "sauvegardes"
+    try:
+        save_dir.mkdir(parents=True, exist_ok=True)
+    except FileNotFoundError:
+        # Parent directory n'existe pas encore : laisser check_usb_health gérer
+        pass
+    except PermissionError as exc:
+        logger.debug("[USB] Impossible de créer le dossier de sauvegarde %s: %s", save_dir, exc)
+    except OSError as exc:
+        logger.debug("[USB] Erreur lors de la création du dossier de sauvegarde %s: %s", save_dir, exc)
+    SAVE_DIR = save_dir
+    _ensure_compat_symlink(USB_ROOT)
+    return USB_ROOT, SAVE_DIR
+
+
+def find_usb_root() -> Optional[Path]:
+    """Detect the USB root directory using the configured environment or heuristics."""
+
+    env_root = os.environ.get("USB_ROOT")
+    if env_root:
+        return _resolve_candidate(Path(env_root))
+
+    candidates: List[Path] = []
+    user_name = os.environ.get("USER") or os.environ.get("USERNAME")
+    if user_name:
+        candidates.append(Path("/media") / user_name)
+    candidates.extend([Path("/media"), Path("/run/media")])
+
+    for base in candidates:
+        try:
+            entries = sorted(p for p in base.iterdir() if p.is_dir())
+        except FileNotFoundError:
+            continue
+        except PermissionError as exc:
+            logger.debug("[USB] Accès refusé à %s: %s", base, exc)
+            continue
+        for entry in entries:
+            if not entry.exists():
+                continue
+            mount_entry = _find_mount_entry(entry)
+            if mount_entry is None:
+                continue
+            if not os.access(entry, os.W_OK | os.X_OK):
+                logger.debug("[USB] %s non accessible en écriture", entry)
+                continue
+            if _test_write_access(entry) is not None:
+                logger.debug("[USB] Impossible d'écrire sur %s", entry)
+                continue
+            return _resolve_candidate(entry)
+
+    return None
 
 
 class UsbPathError(ValueError):
@@ -51,8 +150,9 @@ class UsbHealth:
             "free_bytes": self.free_bytes,
             "detail": self.detail,
             "message": self.message,
-            "root": str(USB_ROOT),
-            "save_dir": str(SAVE_DIR),
+            "root": str(USB_ROOT) if USB_ROOT else None,
+            "path": str(USB_ROOT) if USB_ROOT else None,
+            "save_dir": str(SAVE_DIR) if SAVE_DIR else None,
         }
 
 
@@ -123,27 +223,46 @@ def _test_write_access(directory: Path) -> Optional[OSError]:
 def check_usb_health(test_write: bool = False) -> UsbHealth:
     """Return the health information for the configured USB mount."""
 
-    if not USB_ROOT.exists():
+    global USB_ROOT, SAVE_DIR
+
+    if USB_ROOT is None:
+        detected = find_usb_root()
+        if detected is not None:
+            _set_usb_paths(detected)
+        else:
+            return UsbHealth(
+                mounted=False,
+                writable=False,
+                filesystem=None,
+                free_bytes=None,
+                detail="not_detected",
+                message="Aucune clé USB détectée.",
+            )
+
+    assert USB_ROOT is not None
+    root = USB_ROOT
+
+    if not root.exists():
         return UsbHealth(
             mounted=False,
             writable=False,
             filesystem=None,
             free_bytes=None,
             detail="mount_point_missing",
-            message=f"Le point de montage {USB_ROOT} est introuvable.",
+            message=f"Le point de montage {root} est introuvable.",
         )
 
-    if not USB_ROOT.is_dir():
+    if not root.is_dir():
         return UsbHealth(
             mounted=False,
             writable=False,
             filesystem=None,
             free_bytes=None,
             detail="not_a_directory",
-            message=f"{USB_ROOT} n'est pas un dossier.",
+            message=f"{root} n'est pas un dossier.",
         )
 
-    entry = _find_mount_entry(USB_ROOT)
+    entry = _find_mount_entry(root)
     if entry is None:
         return UsbHealth(
             mounted=False,
@@ -151,11 +270,11 @@ def check_usb_health(test_write: bool = False) -> UsbHealth:
             filesystem=None,
             free_bytes=None,
             detail="not_mounted",
-            message=f"Aucun système de fichiers monté sur {USB_ROOT}.",
+            message=f"Aucun système de fichiers monté sur {root}.",
         )
 
     try:
-        usage = shutil.disk_usage(USB_ROOT)
+        usage = shutil.disk_usage(root)
         free_bytes = usage.free
     except PermissionError as exc:
         return UsbHealth(
@@ -164,22 +283,43 @@ def check_usb_health(test_write: bool = False) -> UsbHealth:
             filesystem=entry.filesystem,
             free_bytes=None,
             detail="permission_denied",
-            message=f"Permission refusée sur {USB_ROOT}: {exc}",
+            message=f"Permission refusée sur {root}: {exc}",
         )
 
-    if not os.access(USB_ROOT, os.W_OK | os.X_OK):
+    save_dir = SAVE_DIR or (root / "sauvegardes")
+    try:
+        save_dir.mkdir(parents=True, exist_ok=True)
+    except PermissionError as exc:
         return UsbHealth(
             mounted=True,
             writable=False,
             filesystem=entry.filesystem,
             free_bytes=free_bytes,
             detail="permission_denied",
-            message="Droits insuffisants pour écrire sur la clé USB.",
+            message=f"Permission refusée pour créer {save_dir}: {exc}",
+        )
+    except OSError as exc:
+        return UsbHealth(
+            mounted=True,
+            writable=False,
+            filesystem=entry.filesystem,
+            free_bytes=free_bytes,
+            detail="io_error",
+            message=f"Impossible de préparer {save_dir}: {exc}",
         )
 
-    if test_write:
-        error = _test_write_access(USB_ROOT)
+    SAVE_DIR = save_dir
+
+    writable = os.access(save_dir, os.W_OK | os.X_OK)
+    detail = None
+    message = None
+    if not writable:
+        detail = "permission_denied"
+        message = "Droits insuffisants pour écrire sur la clé USB."
+    elif test_write:
+        error = _test_write_access(save_dir)
         if error is not None:
+            writable = False
             detail = "io_error"
             message = str(error)
             if isinstance(error, PermissionError):
@@ -191,20 +331,14 @@ def check_usb_health(test_write: bool = False) -> UsbHealth:
             elif error.errno == errno.ENOSPC:
                 detail = "no_space"
                 message = "Espace disque insuffisant sur la clé USB."
-            return UsbHealth(
-                mounted=True,
-                writable=False,
-                filesystem=entry.filesystem,
-                free_bytes=free_bytes,
-                detail=detail,
-                message=message,
-            )
 
     return UsbHealth(
         mounted=True,
-        writable=True,
+        writable=writable,
         filesystem=entry.filesystem,
         free_bytes=free_bytes,
+        detail=detail,
+        message=message,
     )
 
 
@@ -227,8 +361,9 @@ def _ensure_relative_path(relative_path: str) -> Path:
 
 
 def resolve_usb_path(relative_path: str, base: Optional[Path] = None) -> Path:
-    base_path = (base or USB_ROOT).resolve()
-    if not _is_subpath(base_path, USB_ROOT):
+    root = _require_usb_root()
+    base_path = (base or root).resolve()
+    if not _is_subpath(base_path, root):
         raise UsbPathError("Base en dehors de la clé USB")
 
     path_obj = _ensure_relative_path(relative_path)
@@ -246,13 +381,20 @@ def _is_subpath(path: Path, parent: Path) -> bool:
         return False
 
 
+def _require_usb_root() -> Path:
+    if USB_ROOT is None:
+        raise UsbUnavailableError("not_detected", "Clé USB non détectée.")
+    return USB_ROOT
+
+
 def ensure_directory(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     return path
 
 
 def ensure_save_directory(subdir: Optional[str] = None) -> Path:
-    destination = SAVE_DIR
+    root = _require_usb_root()
+    destination = SAVE_DIR or (root / "sauvegardes")
     ensure_directory(destination)
     if subdir:
         destination = resolve_usb_path(subdir, base=destination)
@@ -282,7 +424,8 @@ def ensure_usb_ready(for_writing: bool = False) -> UsbHealth:
     if for_writing and not health.writable:
         detail = health.detail or "read_only"
         message = health.message or "Clé USB non disponible en écriture."
-        raise UsbUnavailableError(detail, message)
+        status_code = 507 if detail == "no_space" else 503
+        raise UsbUnavailableError(detail, message, status_code=status_code)
     return health
 
 
@@ -296,10 +439,11 @@ def ensure_free_space(target_dir: Path, required_bytes: int) -> None:
 
 def list_directory(relative_path: str = "") -> dict:
     ensure_usb_ready(for_writing=False)
+    root = _require_usb_root()
     if relative_path:
         target = resolve_usb_path(relative_path)
     else:
-        target = USB_ROOT
+        target = root
     if not target.exists():
         raise FileNotFoundError("Le dossier demandé n'existe pas sur la clé USB")
     if not target.is_dir():
@@ -319,10 +463,13 @@ def list_directory(relative_path: str = "") -> dict:
                 "type": entry_type,
                 "size": stat_result.st_size,
                 "mtime": stat_result.st_mtime,
-                "path": str(entry.relative_to(USB_ROOT)),
+                "path": str(entry.relative_to(root)),
             }
         )
-    return {"path": str(target.relative_to(USB_ROOT)) if target != USB_ROOT else "", "items": entries}
+    return {
+        "path": str(target.relative_to(root)) if target != root else "",
+        "items": entries,
+    }
 
 
 def make_directory(relative_path: str) -> Path:
@@ -345,4 +492,7 @@ def save_content(filename: str, data: bytes, subdir: Optional[str] = None) -> Pa
 
 def pretty_print_health(health: UsbHealth) -> str:
     return json.dumps(health.to_dict(), indent=2, ensure_ascii=False)
+
+
+_set_usb_paths(find_usb_root())
 

@@ -161,23 +161,37 @@ Suivez ces étapes pour une installation manuelle.
 
 ### 📂 Gestion de la clé USB
 
-L'application écrit toutes les sauvegardes dans **`/mnt/usb/sauvegardes`**. Suivez ces étapes pour préparer la clé :
+L'application recherche automatiquement une clé USB montée dans :
 
-1. **Créer le point de montage et configurer les droits**
+1. `/media/<utilisateur>/*`
+2. `/media/*`
+3. `/run/media/*`
+
+Le premier dossier monté et accessible en écriture est retenu comme **`USB_ROOT`**, puis le sous-dossier **`USB_ROOT/sauvegardes`** est créé au besoin. Pour forcer un chemin précis (par exemple avec des espaces), définissez la variable d'environnement :
+
+```bash
+export USB_ROOT="/media/steeve/31 GB Volume"
+```
+
+Un lien symbolique `/mnt/usb` est créé automatiquement pour conserver la compatibilité avec les anciens scripts, mais l'application n'en dépend plus.
+
+#### Préparer la clé
+
+1. **Monter la clé avec les bons droits**
 
    ```bash
    sudo ./install_usb.sh
    ```
 
-   Le script détecte la clé, affiche l'UUID, ajoute l'utilisateur (`APP_USER` ou `pi` par défaut) au groupe `plugdev`, sauvegarde `/etc/fstab` et applique la configuration (`mount -a`).
+   Ce script détecte la clé, propose une entrée `/etc/fstab`, ajoute l'utilisateur courant au groupe `plugdev` et applique le montage (`mount -a`).
 
-2. **Récupérer l'UUID de la clé** (si vous souhaitez modifier manuellement `/etc/fstab`) :
+2. **Vérifier les montages disponibles**
 
    ```bash
    lsblk -f
    ```
 
-   Exemples d'entrées `/etc/fstab` générées pour l'utilisateur courant (`UID`/`GID`) :
+   Les exemples d'entrées `/etc/fstab` restent valables, quel que soit le point de montage réel :
 
    ```fstab
    UUID=<UUID> /mnt/usb vfat defaults,uid=<UID>,gid=<GID>,umask=000,flush 0 0
@@ -185,26 +199,28 @@ L'application écrit toutes les sauvegardes dans **`/mnt/usb/sauvegardes`**. Sui
    UUID=<UUID> /mnt/usb ntfs defaults,uid=<UID>,gid=<GID>,umask=000 0 0
    ```
 
-3. **Vérifier l'accès depuis l'API** :
+#### Vérifier l'accès depuis l'API
 
-   ```bash
-   curl -s http://localhost:5000/usb/health | jq
-   curl -s -X POST http://localhost:5000/usb/mkdir \
-        -H 'Content-Type: application/json' \
-        -d '{"path":"sauvegardes/tests"}'
-   curl -s -X POST http://localhost:5000/save \
-        -H 'Content-Type: application/json' \
-        -d '{"filename":"test.txt","encoding":"text","content":"Hello USB"}'
-   curl -s http://localhost:5000/usb/list?path=sauvegardes | jq
-   ```
+```bash
+curl -s http://localhost:5000/usb/health | jq
+curl -s -X POST http://localhost:5000/usb/mkdir \
+     -H 'Content-Type: application/json' \
+     -d '{"path":"sauvegardes/tests"}'
+curl -s -X POST http://localhost:5000/save \
+     -H 'Content-Type: application/json' \
+     -d '{"filename":"test.txt","encoding":"text","content":"Hello USB"}'
+curl -s http://localhost:5000/usb/list?path=sauvegardes | jq
+```
 
-4. **Diagnostic complet** :
+La route `GET /usb/health` renvoie un objet `{ ok, path, mounted, writable, free_bytes, ... }` et fournit des codes d'erreur explicites (`503` si la clé est absente, `507` si l'espace libre est insuffisant, etc.).
 
-   ```bash
-   python3 diagnostic_usb.py
-   ```
+#### Diagnostic rapide
 
-   Ce script affiche l'état du montage, les entrées `/etc/fstab`, les permissions de `/mnt/usb` et réalise un test d'écriture.
+```bash
+python3 diagnostic_usb.py
+```
+
+Ce script affiche le chemin détecté, l'état courant et effectue un test d'écriture/suppression dans `sauvegardes/.__test__`.
 
    Pour un démarrage automatique au boot, installer le service systemd fourni :
 
