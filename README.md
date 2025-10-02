@@ -76,6 +76,17 @@ Un script `setup.sh` est fourni pour automatiser l'ensemble du processus sur un 
     - Installer les dépendances Python de `requirements.txt` dans cet environnement.
     - Creer un mode kiosk automatique au demarrage du systeme.
 
+    Le mode kiosk démarre Chromium en plein écran avec les options suivantes pour éviter toute demande manuelle d'autorisation caméra/micro :
+
+    ```bash
+    chromium-browser --kiosk --no-sandbox --noerrdialogs --disable-infobars \
+      --use-fake-ui-for-media-stream \
+      --autoplay-policy=no-user-gesture-required \
+      http://localhost:5000
+    ```
+
+    ⚠️ **Important :** ces options acceptent automatiquement l'accès aux périphériques audio/vidéo. Ne les activez pas sur une machine exposée à Internet.
+
 #### Méthode 2 : Installation manuelle
 
 Suivez ces étapes pour une installation manuelle.
