@@ -16,6 +16,7 @@ import binascii
 import json
 import sys
 import pwd
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -44,6 +45,7 @@ from usb_utils import (
     check_usb_health,
     list_directory as usb_list_directory,
     make_directory as usb_make_directory,
+    prepare_save_path,
     save_content as usb_save_content,
 )
 
@@ -60,12 +62,24 @@ ensure_directories()
 
 CAMERA_SERVER_URL = os.environ.get('CAMERA_SERVER_URL', 'http://localhost:8080')
 
+def _get_effective_user() -> str:
+    try:
+        return pwd.getpwuid(os.geteuid()).pw_name
+    except Exception:
+        return str(os.geteuid())
+
 
 def log_usb_environment() -> None:
-    try:
-        user_name = pwd.getpwuid(os.geteuid()).pw_name
-    except Exception:
-        user_name = str(os.geteuid())
+    user_name = _get_effective_user()
+    root_path = USB_ROOT
+    exists = root_path.exists() if root_path else False
+    writable_flag = os.access(root_path, os.W_OK) if root_path and exists else False
+    free_bytes = None
+    if root_path and exists:
+        try:
+            free_bytes = shutil.disk_usage(root_path).free
+        except OSError as exc:
+            logger.debug("[USB] Impossible de lire l'espace libre sur %s: %s", root_path, exc)
 
     health = check_usb_health(test_write=False)
     logger.info(
@@ -74,7 +88,13 @@ def log_usb_environment() -> None:
         os.geteuid(),
         os.getegid(),
     )
-    logger.info("[USB] Point de montage configuré: %s", USB_ROOT or "(non détecté)")
+    logger.info(
+        "[USB] USB_ROOT=%s exists=%s writable=%s free_bytes=%s",
+        root_path or "(non détecté)",
+        exists,
+        writable_flag,
+        free_bytes,
+    )
     logger.info("[USB] Dossier de sauvegarde: %s", SAVE_DIR or "(non configuré)")
     if health.mounted:
         logger.info(
@@ -133,10 +153,32 @@ def _usb_unavailable_response(exc: UsbUnavailableError):
     return (
         jsonify({
             'success': False,
+            'ok': False,
             'error': str(exc),
             'code': exc.code,
         }),
         exc.status_code,
+    )
+
+
+def _format_usb_os_error(exc: OSError, target_path: Optional[Path]) -> str:
+    user_name = _get_effective_user()
+    parent_candidate: Optional[Path]
+    if target_path is not None:
+        parent_candidate = target_path.parent
+    elif SAVE_DIR is not None:
+        parent_candidate = SAVE_DIR
+    elif USB_ROOT is not None:
+        parent_candidate = USB_ROOT
+    else:
+        parent_candidate = Path('/')
+
+    parent_path = parent_candidate.resolve(strict=False) if parent_candidate else Path('/')
+    writable = os.access(parent_path, os.W_OK)
+    exists = parent_path.exists()
+    return (
+        f"Erreur lors de l'écriture sur la clé USB: {exc} "
+        f"(user={user_name}, path={parent_path}, exists={exists}, writable={writable})"
     )
 
 def check_printer_status():
@@ -381,16 +423,48 @@ def review_photo():
 def usb_health():
     """Indique l'état courant du point de montage USB."""
 
-    test_write = request.args.get('test_write', '1')
-    test_write_enabled = str(test_write).lower() not in {'0', 'false', 'no'}
+    test_write_param = request.args.get('test_write')
+    if test_write_param is None:
+        test_write_enabled = False
+    else:
+        test_write_enabled = str(test_write_param).lower() not in {'0', 'false', 'no'}
+
     health = check_usb_health(test_write=test_write_enabled)
-    payload = health.to_dict()
-    ok = health.mounted and (health.writable or not test_write_enabled)
-    payload['path'] = payload.get('path') or payload.get('root')
-    payload['ok'] = ok
-    payload['success'] = ok
-    status_code = 200 if ok else (507 if health.detail == 'no_space' else 503)
-    return jsonify(payload), status_code
+    path_str = str(USB_ROOT) if USB_ROOT else None
+    ok = health.mounted and health.writable
+    status_code = 200 if ok else 503
+
+    message = health.message
+    if not message:
+        if not health.mounted:
+            message = "Clé USB non détectée ou non montée."
+        elif not health.writable:
+            message = "Clé USB non disponible en écriture."
+
+    if health.detail == 'no_space':
+        ok = False
+        status_code = 507
+        if not message:
+            message = "Espace disque insuffisant sur la clé USB."
+
+    response = {
+        'ok': ok,
+        'success': ok,
+        'user': _get_effective_user(),
+        'path': path_str,
+        'mounted': health.mounted,
+        'writable': health.writable,
+        'free_bytes': health.free_bytes,
+        'filesystem': health.filesystem,
+        'detail': health.detail,
+        'message': message,
+        'test_write': test_write_enabled,
+    }
+
+    if SAVE_DIR:
+        response['save_dir'] = str(SAVE_DIR)
+
+    return jsonify(response), status_code
 
 
 @app.route('/usb/list', methods=['GET'])
@@ -454,17 +528,23 @@ def usb_save_route():
         filename, data, subdir = _parse_save_payload(payload)
         saved_path = usb_save_content(filename, data, subdir=subdir)
     except ValueError as exc:
-        return jsonify({'success': False, 'error': str(exc)}), 400
+        return jsonify({'success': False, 'ok': False, 'error': str(exc)}), 400
     except UsbPathError as exc:
-        return jsonify({'success': False, 'error': str(exc)}), 403
+        return jsonify({'success': False, 'ok': False, 'error': str(exc)}), 403
     except UsbUnavailableError as exc:
         return _usb_unavailable_response(exc)
     except PermissionError as exc:
         logger.error("[USB] Permission refusée pour sauvegarder %s: %s", payload, exc)
-        return jsonify({'success': False, 'error': str(exc)}), 403
+        return jsonify({'success': False, 'ok': False, 'error': str(exc)}), 403
     except OSError as exc:
-        logger.error("[USB] Erreur lors de la sauvegarde USB: %s", exc)
-        return jsonify({'success': False, 'error': str(exc)}), 500
+        target_path = None
+        try:
+            target_path = prepare_save_path(filename, subdir=subdir)
+        except Exception:  # pragma: no cover - contexte de journalisation uniquement
+            target_path = None
+        error_message = _format_usb_os_error(exc, target_path)
+        logger.error("[USB] Erreur lors de la sauvegarde USB: %s", error_message)
+        return jsonify({'success': False, 'ok': False, 'error': error_message}), 500
 
     try:
         relative = str(saved_path.relative_to(USB_ROOT)) if USB_ROOT else saved_path.name
@@ -472,10 +552,11 @@ def usb_save_route():
         relative = saved_path.name
     return jsonify({
         'success': True,
+        'ok': True,
         'path': relative,
         'absolute_path': str(saved_path),
         'size': len(data),
-    }), 201
+    }), 200
 
 
 @app.route('/save_photo_usb', methods=['POST'])
