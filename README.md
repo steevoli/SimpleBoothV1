@@ -159,6 +159,53 @@ Suivez ces étapes pour une installation manuelle.
    curl -o test.jpg http://localhost:8080/snapshot
    ```
 
+### 📂 Gestion de la clé USB
+
+L'application écrit toutes les sauvegardes dans **`/mnt/usb/sauvegardes`**. Suivez ces étapes pour préparer la clé :
+
+1. **Créer le point de montage et configurer les droits**
+
+   ```bash
+   sudo ./install_usb.sh
+   ```
+
+   Le script détecte la clé, affiche l'UUID, ajoute l'utilisateur (`APP_USER` ou `pi` par défaut) au groupe `plugdev`, sauvegarde `/etc/fstab` et applique la configuration (`mount -a`).
+
+2. **Récupérer l'UUID de la clé** (si vous souhaitez modifier manuellement `/etc/fstab`) :
+
+   ```bash
+   lsblk -f
+   ```
+
+   Exemples d'entrées `/etc/fstab` générées pour l'utilisateur courant (`UID`/`GID`) :
+
+   ```fstab
+   UUID=<UUID> /mnt/usb vfat defaults,uid=<UID>,gid=<GID>,umask=000,flush 0 0
+   UUID=<UUID> /mnt/usb exfat defaults,uid=<UID>,gid=<GID>,umask=000 0 0
+   UUID=<UUID> /mnt/usb ntfs defaults,uid=<UID>,gid=<GID>,umask=000 0 0
+   ```
+
+3. **Vérifier l'accès depuis l'API** :
+
+   ```bash
+   curl -s http://localhost:5000/usb/health | jq
+   curl -s -X POST http://localhost:5000/usb/mkdir \
+        -H 'Content-Type: application/json' \
+        -d '{"path":"sauvegardes/tests"}'
+   curl -s -X POST http://localhost:5000/save \
+        -H 'Content-Type: application/json' \
+        -d '{"filename":"test.txt","encoding":"text","content":"Hello USB"}'
+   curl -s http://localhost:5000/usb/list?path=sauvegardes | jq
+   ```
+
+4. **Diagnostic complet** :
+
+   ```bash
+   python3 diagnostic_usb.py
+   ```
+
+   Ce script affiche l'état du montage, les entrées `/etc/fstab`, les permissions de `/mnt/usb` et réalise un test d'écriture.
+
    Pour un démarrage automatique au boot, installer le service systemd fourni :
 
    ```bash
