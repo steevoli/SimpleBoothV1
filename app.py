@@ -74,8 +74,8 @@ def log_usb_environment() -> None:
         os.geteuid(),
         os.getegid(),
     )
-    logger.info("[USB] Point de montage configuré: %s", USB_ROOT)
-    logger.info("[USB] Dossier de sauvegarde: %s", SAVE_DIR)
+    logger.info("[USB] Point de montage configuré: %s", USB_ROOT or "(non détecté)")
+    logger.info("[USB] Dossier de sauvegarde: %s", SAVE_DIR or "(non configuré)")
     if health.mounted:
         logger.info(
             "[USB] Monté=%s, système de fichiers=%s, writable=%s, libre=%s octets",
@@ -385,8 +385,11 @@ def usb_health():
     test_write_enabled = str(test_write).lower() not in {'0', 'false', 'no'}
     health = check_usb_health(test_write=test_write_enabled)
     payload = health.to_dict()
-    payload['success'] = health.mounted and (health.writable or not test_write_enabled)
-    status_code = 200 if payload['success'] else 503
+    ok = health.mounted and (health.writable or not test_write_enabled)
+    payload['path'] = payload.get('path') or payload.get('root')
+    payload['ok'] = ok
+    payload['success'] = ok
+    status_code = 200 if ok else (507 if health.detail == 'no_space' else 503)
     return jsonify(payload), status_code
 
 
@@ -431,7 +434,10 @@ def usb_make_directory_route():
         logger.error("[USB] Erreur lors de la création de dossier USB: %s", exc)
         return jsonify({'success': False, 'error': str(exc)}), 500
 
-    relative = str(created.relative_to(USB_ROOT))
+    try:
+        relative = str(created.relative_to(USB_ROOT)) if USB_ROOT else created.name
+    except ValueError:
+        relative = created.name
     return jsonify({
         'success': True,
         'path': relative,
@@ -460,7 +466,10 @@ def usb_save_route():
         logger.error("[USB] Erreur lors de la sauvegarde USB: %s", exc)
         return jsonify({'success': False, 'error': str(exc)}), 500
 
-    relative = str(saved_path.relative_to(USB_ROOT))
+    try:
+        relative = str(saved_path.relative_to(USB_ROOT)) if USB_ROOT else saved_path.name
+    except ValueError:
+        relative = saved_path.name
     return jsonify({
         'success': True,
         'path': relative,

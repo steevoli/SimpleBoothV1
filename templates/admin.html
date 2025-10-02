@@ -1111,9 +1111,10 @@ async function refreshUsbHealth() {
 
         let alertClass = 'alert-warning';
         let icon = 'fas fa-exclamation-triangle';
+        const ok = Boolean(data.ok);
         let message = data.message || 'Clé USB indisponible.';
 
-        if (response.ok && data.mounted && data.writable) {
+        if (ok) {
             alertClass = 'alert-success';
             icon = 'fas fa-check-circle';
             message = 'Clé USB disponible et accessible en écriture.';
@@ -1129,7 +1130,7 @@ async function refreshUsbHealth() {
             <div>
                 <div>${message}</div>
                 <small class="text-muted">
-                    Point de montage : ${data.root || '/mnt/usb'}
+                    Point de montage : ${data.path || '(inconnu)'}
                 </small>
             </div>
         `;
