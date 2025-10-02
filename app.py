@@ -167,43 +167,30 @@ frame_lock = threading.Lock()
 
 
 def fetch_plan_b_frame(camera_server_base: str, timeout: float = 5.0) -> Optional[bytes]:
-    """Récupère une frame JPEG depuis le flux MJPEG du serveur Plan B."""
+    """Récupère un cliché JPEG depuis le service caméra local."""
 
     if not camera_server_base:
         return None
 
-    stream_url = f"{camera_server_base.rstrip('/')}/camera/stream"
-    logger.info("[PLAN B] Capture d'une frame via %s", stream_url)
+    snapshot_url = f"{camera_server_base.rstrip('/')}/snapshot"
+    logger.info("[PLAN B] Capture d'une frame via %s", snapshot_url)
 
     try:
-        start_time = time.time()
-        with requests.get(stream_url, stream=True, timeout=(3, timeout)) as response:
-            response.raise_for_status()
-
-            buffer = b''
-            for chunk in response.iter_content(chunk_size=4096):
-                if not chunk:
-                    continue
-
-                buffer += chunk
-
-                start_marker = buffer.find(b'\xff\xd8')
-                if start_marker == -1:
-                    if len(buffer) > 2_000_000:
-                        buffer = buffer[-1_000_000:]
-                    continue
-
-                end_marker = buffer.find(b'\xff\xd9', start_marker + 2)
-                if end_marker != -1:
-                    frame = buffer[start_marker:end_marker + 2]
-                    logger.info("[PLAN B] Frame MJPEG récupérée (%d octets)", len(frame))
-                    return frame
-
-                if time.time() - start_time > timeout:
-                    raise TimeoutError("Temps dépassé lors de la récupération de la frame Plan B")
-
-    except Exception as exc:
-        logger.error("[PLAN B] Impossible de récupérer une frame: %s", exc)
+        response = requests.get(snapshot_url, timeout=timeout)
+        if response.status_code != 200:
+            logger.warning(
+                "[PLAN B] Service caméra a répondu %s: %s",
+                response.status_code,
+                response.text,
+            )
+            return None
+        return response.content
+    except requests.Timeout:
+        logger.error("[PLAN B] Timeout lors de l'appel au service caméra")
+    except requests.RequestException as exc:
+        logger.error("[PLAN B] Erreur HTTP vers le service caméra: %s", exc)
+    except Exception as exc:  # pragma: no cover - sécurité supplémentaire
+        logger.exception("[PLAN B] Erreur inattendue: %s", exc)
 
     return None
 
@@ -231,30 +218,44 @@ def capture_photo():
         filename = f'photo_{timestamp}.jpg'
         filepath = os.path.join(PHOTOS_FOLDER, filename)
 
-        request_data = request.get_json(silent=True) or {}
-        requested_plan_b = bool(request_data.get('planB'))
-        camera_server_base = request_data.get('cameraServerBase') or CAMERA_SERVER_URL
+        frame_bytes: Optional[bytes] = None
 
-        # Capturer la frame actuelle du flux MJPEG
-        with frame_lock:
-            frame_bytes = last_frame
+        if 'image' in request.files:
+            uploaded = request.files['image']
+            frame_bytes = uploaded.read() or None
+            if frame_bytes is None:
+                return jsonify({'success': False, 'error': "Image envoyée vide"}), 400
+        else:
+            request_data = request.get_json(silent=True) or {}
+            requested_plan_b = bool(request_data.get('planB'))
+            camera_server_base = request_data.get('cameraServerBase') or CAMERA_SERVER_URL
 
-        use_plan_b = requested_plan_b or frame_bytes is None
-
-        if use_plan_b:
-            plan_b_frame = fetch_plan_b_frame(camera_server_base)
-            if plan_b_frame is None:
-                logger.info("Plan B indisponible pour la capture")
-                error_message = "Flux Plan B indisponible. Vérifiez le service caméra (port 8080)."
-                return jsonify({'success': False, 'error': error_message})
-
-            frame_bytes = plan_b_frame
+            # Capturer la frame actuelle du flux MJPEG
             with frame_lock:
-                last_frame = frame_bytes
+                frame_bytes = last_frame
 
-        if frame_bytes is None:
-            logger.info("Aucune frame disponible dans le flux")
-            return jsonify({'success': False, 'error': 'Aucune frame disponible'})
+            use_plan_b = requested_plan_b or frame_bytes is None
+
+            if use_plan_b:
+                plan_b_frame = fetch_plan_b_frame(camera_server_base)
+                if plan_b_frame is None:
+                    logger.info("Plan B indisponible pour la capture")
+                    error_message = (
+                        "Service caméra indisponible (8080). Vérifie qu'il tourne : "
+                        "sudo systemctl status camera-service."
+                    )
+                    return jsonify({'success': False, 'error': error_message})
+
+                frame_bytes = plan_b_frame
+                with frame_lock:
+                    last_frame = frame_bytes
+
+            if frame_bytes is None:
+                logger.info("Aucune frame disponible dans le flux")
+                return jsonify({'success': False, 'error': 'Aucune frame disponible'})
+
+        with frame_lock:
+            last_frame = frame_bytes
 
         # Sauvegarder la frame directement
         with open(filepath, 'wb') as f:

@@ -41,6 +41,13 @@
         background: #000;
     }
 
+    #cameraStatusChip {
+        position: absolute;
+        top: 1rem;
+        right: 1rem;
+        z-index: 20;
+    }
+
     .camera-controls {
         position: absolute;
         bottom: 3rem;
@@ -125,8 +132,8 @@
     }
     </style>
 
-    <div id="cameraErrorBanner" class="alert alert-danger d-none camera-error-banner" role="alert">
-        <div class="fw-bold">Impossible d'accéder à la caméra.</div>
+    <div id="cameraErrorBanner" class="alert alert-warning d-none camera-error-banner" role="alert">
+        <div id="cameraErrorBannerTitle" class="fw-bold">Statut caméra</div>
         <div id="cameraErrorBannerText" class="mt-2"></div>
         <div id="cameraErrorBannerDetails" class="small text-muted mt-2"></div>
         <div class="d-flex gap-2 mt-3">
@@ -149,8 +156,9 @@
         </video>
         <img id="cameraFallbackImage"
              class="d-none"
-             alt="Flux MJPEG caméra">
-        <span id="planBBadge" class="badge bg-warning text-dark position-absolute top-0 start-0 m-3 d-none">Plan B (MJPEG)</span>
+             alt="Capture système (8080)">
+        <span id="planBBadge" class="badge bg-warning text-dark position-absolute top-0 start-0 m-3 d-none">Capture système (8080)</span>
+        <span id="cameraStatusChip" class="badge bg-info text-dark">Caméra locale : vérification…</span>
     </div>
 
     <div class="camera-controls">
@@ -285,34 +293,42 @@
 
 {% block scripts %}
 <script type="module">
-import { CameraClient } from "/static/js/cameraClient.js";
+const CAMERA_SERVICE_BASE = window.SIMPLEBOOTH_CAMERA_SERVER
+    || `${window.location.protocol}//${window.location.hostname}:8080`;
 
 let isCapturing = false;
 let usbManagerModal = null;
 let usbPhotos = [];
 let selectedUsbPhotoName = null;
-let cameraClient = null;
+
+let localStream = null;
+let usingBrowserCamera = false;
+let usingHttpFallback = false;
+let lastFallbackUrl = null;
+
+const videoElement = document.getElementById('cameraVideo');
+const fallbackImage = document.getElementById('cameraFallbackImage');
+const planBBadge = document.getElementById('planBBadge');
+const statusChip = document.getElementById('cameraStatusChip');
+const errorBanner = document.getElementById('cameraErrorBanner');
+const errorBannerTitle = document.getElementById('cameraErrorBannerTitle');
+const errorBannerText = document.getElementById('cameraErrorBannerText');
+const errorBannerDetails = document.getElementById('cameraErrorBannerDetails');
+const retryButton = document.getElementById('cameraRetryButton');
+const diagnosticButton = document.getElementById('cameraDiagnosticButton');
+const diagnosticsModal = document.getElementById('cameraDiagnosticModal');
+const diagnosticsDevicesList = document.getElementById('cameraDiagnosticDevices');
+const diagnosticsHealthPre = document.getElementById('cameraHealthDump');
+const diagnosticsTimestamp = document.getElementById('cameraDiagnosticTimestamp');
 
 document.addEventListener('DOMContentLoaded', async () => {
-    try {
-        cameraClient = new CameraClient({
-            videoElement: document.getElementById('cameraVideo'),
-            fallbackImage: document.getElementById('cameraFallbackImage'),
-            planBBadge: document.getElementById('planBBadge'),
-            errorBanner: document.getElementById('cameraErrorBanner'),
-            errorBannerText: document.getElementById('cameraErrorBannerText'),
-            errorBannerDetails: document.getElementById('cameraErrorBannerDetails'),
-            diagnosticsModal: document.getElementById('cameraDiagnosticModal'),
-            diagnosticsDevicesList: document.getElementById('cameraDiagnosticDevices'),
-            diagnosticsHealthPre: document.getElementById('cameraHealthDump'),
-            diagnosticsTimestamp: document.getElementById('cameraDiagnosticTimestamp'),
-            retryButton: document.getElementById('cameraRetryButton'),
-            diagnosticButton: document.getElementById('cameraDiagnosticButton')
-        });
-        await cameraClient.initialise();
-        window.SimpleBoothCameraClient = cameraClient;
-    } catch (error) {
-        console.error('Erreur lors de l\'initialisation de la caméra', error);
+    await initialiseCamera();
+
+    if (retryButton) {
+        retryButton.addEventListener('click', handleCameraRetry);
+    }
+    if (diagnosticButton) {
+        diagnosticButton.addEventListener('click', openCameraDiagnostics);
     }
 
     const refreshBtn = document.getElementById('usbRefreshBtn');
@@ -327,6 +343,395 @@ document.addEventListener('DOMContentLoaded', async () => {
             highlightSelectedUsb(null);
         });
     }
+});
+
+function describeError(error) {
+    if (!error) {
+        return 'Erreur inconnue';
+    }
+    if (typeof error === 'string') {
+        return error;
+    }
+    const name = error.name || error.constructor?.name || 'Erreur';
+    const message = error.message || String(error);
+    return `${name}: ${message}`;
+}
+
+function showCameraMessage(message, details = '', variant = 'warning', title = 'Statut caméra') {
+    if (!errorBanner) {
+        return;
+    }
+
+    errorBanner.classList.remove('d-none', 'alert-danger', 'alert-warning', 'alert-info', 'alert-success');
+    errorBanner.classList.add(`alert-${variant}`);
+
+    if (errorBannerTitle) {
+        errorBannerTitle.textContent = title;
+    }
+    if (errorBannerText) {
+        errorBannerText.textContent = message;
+    }
+    if (errorBannerDetails) {
+        errorBannerDetails.textContent = details || '';
+        errorBannerDetails.classList.toggle('d-none', !details);
+    }
+}
+
+function hideCameraMessage() {
+    if (!errorBanner) {
+        return;
+    }
+    errorBanner.classList.add('d-none');
+    errorBanner.classList.remove('alert-danger', 'alert-warning', 'alert-info', 'alert-success');
+    if (errorBannerText) {
+        errorBannerText.textContent = '';
+    }
+    if (errorBannerDetails) {
+        errorBannerDetails.textContent = '';
+        errorBannerDetails.classList.add('d-none');
+    }
+}
+
+function setStatusChip(text, variant = 'info') {
+    if (!statusChip) {
+        return;
+    }
+    const classesToRemove = ['bg-info', 'bg-success', 'bg-danger', 'bg-warning', 'text-dark', 'text-white'];
+    statusChip.classList.remove(...classesToRemove);
+
+    if (variant === 'success') {
+        statusChip.classList.add('bg-success', 'text-white');
+    } else if (variant === 'danger') {
+        statusChip.classList.add('bg-danger', 'text-white');
+    } else if (variant === 'warning') {
+        statusChip.classList.add('bg-warning', 'text-dark');
+    } else {
+        statusChip.classList.add('bg-info', 'text-dark');
+    }
+
+    statusChip.textContent = text;
+}
+
+async function requestCameraHealth() {
+    const url = `${CAMERA_SERVICE_BASE}/health`;
+    try {
+        const response = await fetch(url, {
+            method: 'GET',
+            mode: 'cors',
+            cache: 'no-store',
+        });
+        let payload = null;
+        try {
+            payload = await response.json();
+        } catch (jsonError) {
+            payload = { ok: false, error: 'Réponse JSON invalide' };
+        }
+        if (!payload || typeof payload !== 'object') {
+            payload = { ok: false, error: 'Réponse inattendue' };
+        }
+        const ok = response.ok && payload && payload.ok === true;
+        return { ok, payload, response };
+    } catch (error) {
+        return {
+            ok: false,
+            payload: { ok: false, error: describeError(error) },
+            response: null,
+        };
+    }
+}
+
+async function updateCameraHealthIndicator() {
+    const result = await requestCameraHealth();
+    if (result.ok) {
+        setStatusChip('Caméra locale prête', 'success');
+    } else {
+        setStatusChip('Caméra locale indisponible', 'danger');
+    }
+    return result;
+}
+
+async function ensureVideoReady(video) {
+    if (!video) {
+        return;
+    }
+    if (video.readyState >= 2 && video.videoWidth && video.videoHeight) {
+        return;
+    }
+    await new Promise((resolve) => {
+        const cleanup = () => {
+            video.removeEventListener('loadeddata', cleanup);
+            video.removeEventListener('loadedmetadata', cleanup);
+            resolve();
+        };
+        video.addEventListener('loadeddata', cleanup, { once: true });
+        video.addEventListener('loadedmetadata', cleanup, { once: true });
+    });
+}
+
+function stopLocalStream() {
+    if (localStream) {
+        localStream.getTracks().forEach((track) => track.stop());
+    }
+    if (videoElement) {
+        videoElement.srcObject = null;
+    }
+    localStream = null;
+    usingBrowserCamera = false;
+}
+
+async function startBrowserCamera() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error('API getUserMedia indisponible');
+    }
+
+    stopLocalStream();
+    try {
+        localStream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: { ideal: 'environment' } },
+            audio: false,
+        });
+    } catch (error) {
+        localStream = null;
+        throw error;
+    }
+
+    usingBrowserCamera = true;
+    usingHttpFallback = false;
+    if (videoElement) {
+        videoElement.classList.remove('d-none');
+        videoElement.srcObject = localStream;
+        await ensureVideoReady(videoElement);
+    }
+    if (fallbackImage) {
+        fallbackImage.classList.add('d-none');
+    }
+    if (planBBadge) {
+        planBBadge.classList.add('d-none');
+    }
+    hideCameraMessage();
+}
+
+function revokeFallbackUrl() {
+    if (lastFallbackUrl) {
+        URL.revokeObjectURL(lastFallbackUrl);
+        lastFallbackUrl = null;
+    }
+}
+
+function displayFallbackImage(blob) {
+    if (!fallbackImage) {
+        return;
+    }
+    revokeFallbackUrl();
+    lastFallbackUrl = URL.createObjectURL(blob);
+    fallbackImage.src = lastFallbackUrl;
+}
+
+async function fetchSnapshotBlob() {
+    const response = await fetch(`${CAMERA_SERVICE_BASE}/snapshot`, {
+        method: 'GET',
+        mode: 'cors',
+        cache: 'no-store',
+    });
+    if (!response.ok) {
+        const text = await response.text();
+        throw new Error(text || `Erreur ${response.status}`);
+    }
+    return await response.blob();
+}
+
+async function refreshFallbackPreview() {
+    try {
+        const blob = await fetchSnapshotBlob();
+        if (fallbackImage) {
+            fallbackImage.classList.remove('d-none');
+        }
+        if (planBBadge) {
+            planBBadge.classList.remove('d-none');
+        }
+        displayFallbackImage(blob);
+    } catch (error) {
+        const message = "Service caméra indisponible (8080). Vérifie qu'il tourne : sudo systemctl status camera-service.";
+        showCameraMessage(message, describeError(error), 'danger');
+    }
+}
+
+async function activateHttpFallback(reason) {
+    stopLocalStream();
+    usingHttpFallback = true;
+    usingBrowserCamera = false;
+
+    if (videoElement) {
+        videoElement.classList.add('d-none');
+    }
+    if (fallbackImage) {
+        fallbackImage.classList.remove('d-none');
+    }
+    if (planBBadge) {
+        planBBadge.classList.remove('d-none');
+    }
+
+    const permissionDenied = reason && ['NotAllowedError', 'SecurityError'].includes(reason.name);
+    const message = permissionDenied
+        ? 'Caméra navigateur refusée → bascule sur capture système (8080)…'
+        : 'Capture navigateur indisponible → bascule sur capture système (8080)…';
+    showCameraMessage(message, describeError(reason), 'warning');
+    await updateCameraHealthIndicator();
+    await refreshFallbackPreview();
+}
+
+async function initialiseCamera() {
+    await updateCameraHealthIndicator();
+
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        await activateHttpFallback(new Error('API getUserMedia indisponible sur ce navigateur'));
+        return;
+    }
+
+    try {
+        await startBrowserCamera();
+    } catch (error) {
+        console.warn('Impossible de démarrer la caméra navigateur, bascule sur fallback HTTP', error);
+        await activateHttpFallback(error);
+    }
+}
+
+async function handleCameraRetry(event) {
+    event?.preventDefault?.();
+    hideCameraMessage();
+    try {
+        await startBrowserCamera();
+    } catch (error) {
+        await activateHttpFallback(error);
+    }
+}
+
+async function listVideoDevices() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
+        return { devices: [], error: 'API enumerateDevices indisponible' };
+    }
+    try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        return { devices: devices.filter((device) => device.kind === 'videoinput'), error: null };
+    } catch (error) {
+        return { devices: [], error: describeError(error) };
+    }
+}
+
+function renderDiagnosticsDevices(devices, errorMessage) {
+    if (!diagnosticsDevicesList) {
+        return;
+    }
+    diagnosticsDevicesList.innerHTML = '';
+
+    if (errorMessage) {
+        const li = document.createElement('li');
+        li.className = 'list-group-item list-group-item-danger';
+        li.textContent = errorMessage;
+        diagnosticsDevicesList.appendChild(li);
+        return;
+    }
+
+    if (!devices.length) {
+        const li = document.createElement('li');
+        li.className = 'list-group-item';
+        li.textContent = 'Aucune caméra détectée par le navigateur.';
+        diagnosticsDevicesList.appendChild(li);
+        return;
+    }
+
+    devices.forEach((device, index) => {
+        const li = document.createElement('li');
+        li.className = 'list-group-item';
+        const label = device.label || `Caméra ${index + 1}`;
+        li.innerHTML = `<strong>${label}</strong><br><small>ID: ${device.deviceId || 'inconnu'}</small>`;
+        diagnosticsDevicesList.appendChild(li);
+    });
+}
+
+async function openCameraDiagnostics(event) {
+    event?.preventDefault?.();
+    const { devices, error } = await listVideoDevices();
+    renderDiagnosticsDevices(devices, error);
+
+    const health = await requestCameraHealth();
+    if (diagnosticsHealthPre) {
+        diagnosticsHealthPre.textContent = JSON.stringify(health.payload, null, 2);
+    }
+    if (diagnosticsTimestamp) {
+        diagnosticsTimestamp.textContent = new Date().toLocaleString('fr-FR');
+    }
+
+    const modalLib = window.bootstrap?.Modal;
+    if (modalLib && diagnosticsModal) {
+        modalLib.getOrCreateInstance(diagnosticsModal).show();
+    }
+}
+
+async function captureFromVideo() {
+    if (!videoElement) {
+        throw new Error('Aucune vidéo active');
+    }
+    await ensureVideoReady(videoElement);
+
+    const width = videoElement.videoWidth || 1280;
+    const height = videoElement.videoHeight || 720;
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext('2d');
+    if (!context) {
+        throw new Error("Impossible d'accéder au contexte canvas");
+    }
+    context.drawImage(videoElement, 0, 0, width, height);
+
+    return await new Promise((resolve, reject) => {
+        canvas.toBlob((blob) => {
+            if (blob) {
+                resolve(blob);
+            } else {
+                reject(new Error("Impossible de générer l'image"));
+            }
+        }, 'image/jpeg', 0.92);
+    });
+}
+
+async function takePhoto() {
+    const health = await updateCameraHealthIndicator();
+
+    if (localStream && usingBrowserCamera) {
+        const blob = await captureFromVideo();
+        return { blob, origin: 'browser' };
+    }
+
+    if (!health.ok) {
+        const message = "Service caméra indisponible (8080). Vérifie qu'il tourne : sudo systemctl status camera-service.";
+        const details = health.payload?.error ? String(health.payload.error) : '';
+        showCameraMessage(message, details, 'danger');
+        throw new Error(message);
+    }
+
+    try {
+        const blob = await fetchSnapshotBlob();
+        usingHttpFallback = true;
+        if (fallbackImage) {
+            fallbackImage.classList.remove('d-none');
+        }
+        if (planBBadge) {
+            planBBadge.classList.remove('d-none');
+        }
+        displayFallbackImage(blob);
+        return { blob, origin: 'http-fallback' };
+    } catch (error) {
+        const message = "Service caméra indisponible (8080). Vérifie qu'il tourne : sudo systemctl status camera-service.";
+        showCameraMessage(message, describeError(error), 'danger');
+        throw new Error(message);
+    }
+}
+
+window.addEventListener('beforeunload', () => {
+    stopLocalStream();
+    revokeFallbackUrl();
 });
 
 function capturePhoto() {
@@ -369,34 +774,36 @@ function capturePhoto() {
 }
 
 async function takePicture() {
+    let redirected = false;
     try {
-        const payload = {
-            planB: !!window.SimpleBoothCameraClient?.isPlanBActive,
-            cameraServerBase: window.SimpleBoothCameraClient?.cameraServerBase || null,
-        };
+        const { blob, origin } = await takePhoto();
+        const formData = new FormData();
+        formData.append('image', blob, `capture_${Date.now()}.jpg`);
+        formData.append('origin', origin);
 
         const response = await fetch('/capture', {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify(payload),
+            body: formData,
         });
-        
+
         const result = await response.json();
-        
-        if (result.success) {
-            // Rediriger vers la page de révision
+
+        if (response.ok && result.success) {
+            redirected = true;
+            resetCaptureButton();
             window.location.href = '/review';
-        } else {
-            throw new Error(result.error || 'Erreur de capture');
+            return;
         }
-        
+
+        const errorMessage = result.error || 'Erreur de capture';
+        throw new Error(errorMessage);
     } catch (error) {
         console.error('Erreur lors de la capture:', error);
-        alert('Erreur lors de la prise de photo: ' + error.message);
-        
-        resetCaptureButton();
+        alert('Erreur lors de la prise de photo: ' + (error.message || error));
+    } finally {
+        if (!redirected) {
+            resetCaptureButton();
+        }
     }
 }
 
