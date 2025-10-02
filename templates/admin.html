@@ -696,9 +696,9 @@
                         </button>
                     </div>
                     <div class="col-4">
-                        <button type="button" class="btn btn-success w-100" id="reprintBtn">
-                            <i class="fas fa-print me-2"></i>
-                            Réimprimer
+                        <button type="button" class="btn btn-success w-100" id="saveBtn">
+                            <i class="fas fa-save me-2"></i>
+                            Sauvegarder
                         </button>
                     </div>
                 </div>
@@ -842,12 +842,12 @@ function openPhotoModal(element) {
         window.location.href = `{{ url_for('download_photo', filename='') }}${filename}`;
     };
     
-    document.getElementById('reprintBtn').onclick = function() {
-        if (confirm('Voulez-vous vraiment réimprimer cette photo ?')) {
+    document.getElementById('saveBtn').onclick = function() {
+        if (confirm('Voulez-vous vraiment sauvegarder cette photo ?')) {
             // Créer un formulaire pour la requête POST
             const form = document.createElement('form');
             form.method = 'POST';
-            form.action = `{{ url_for('reprint_photo', filename='') }}${filename}`;
+            form.action = `{{ url_for('save_photo', filename='') }}${filename}`;
             document.body.appendChild(form);
             form.submit();
         }
